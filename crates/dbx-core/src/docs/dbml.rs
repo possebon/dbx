@@ -75,12 +75,13 @@ pub(crate) fn render_default(column: &ColumnInfo) -> Option<String> {
 
 /// DBML does not validate type names, so native types pass through intact.
 /// Precision is reconstructed only when the engine reported a bare type.
-pub(crate) fn render_type(column: &ColumnInfo, table_name: &str) -> String {
+pub(crate) fn render_type(column: &ColumnInfo, table_schema: Option<&str>, table_name: &str, qualify: bool) -> String {
     // A column carrying inline enum values (MySQL `ENUM(...)`) is emitted as a
-    // named enum elsewhere in the document; the column must reference that name
-    // rather than repeat the inline type, or the Enum block is an orphan.
+    // named enum elsewhere in the document. This must produce the SAME string
+    // `render_enum` produces for that block — including schema qualification —
+    // or the reference dangles and the Enum block becomes an orphan.
     if column.enum_values.as_ref().is_some_and(|values| !values.is_empty()) {
-        return quote_identifier(&format!("{table_name}_{}", column.name));
+        return qualified(table_schema, &format!("{table_name}_{}", column.name), qualify);
     }
 
     let base = column.data_type.trim();
@@ -158,7 +159,7 @@ pub(crate) fn render_table(table: &DocTable, qualify: bool, warnings: &mut Vec<S
         out.push_str(&format!(
             "  {} {}{}\n",
             quote_identifier(&column.name),
-            render_type(column, &table.name),
+            render_type(column, table.schema.as_deref(), &table.name, qualify),
             rendered_settings
         ));
     }
@@ -410,33 +411,61 @@ mod tests {
 
     #[test]
     fn types_pass_through_verbatim_when_already_parameterised() {
-        assert_eq!(render_type(&col("total", "numeric(10,2)"), "orders"), "numeric(10,2)");
-        assert_eq!(render_type(&col("meta", "jsonb"), "orders"), "jsonb");
-        assert_eq!(render_type(&col("at", "timestamp with time zone"), "orders"), "timestamp with time zone");
+        assert_eq!(render_type(&col("total", "numeric(10,2)"), None, "orders", false), "numeric(10,2)");
+        assert_eq!(render_type(&col("meta", "jsonb"), None, "orders", false), "jsonb");
+        assert_eq!(
+            render_type(&col("at", "timestamp with time zone"), None, "orders", false),
+            "timestamp with time zone"
+        );
     }
 
     #[test]
     fn bare_types_are_reconstructed_from_precision_metadata() {
         let mut varchar = col("email", "character varying");
         varchar.character_maximum_length = Some(255);
-        assert_eq!(render_type(&varchar, "orders"), "character varying(255)");
+        assert_eq!(render_type(&varchar, None, "orders", false), "character varying(255)");
 
         let mut decimal = col("total", "numeric");
         decimal.numeric_precision = Some(10);
         decimal.numeric_scale = Some(2);
-        assert_eq!(render_type(&decimal, "orders"), "numeric(10,2)");
+        assert_eq!(render_type(&decimal, None, "orders", false), "numeric(10,2)");
 
         let mut integer = col("count", "numeric");
         integer.numeric_precision = Some(8);
         integer.numeric_scale = Some(0);
-        assert_eq!(render_type(&integer, "orders"), "numeric(8)");
+        assert_eq!(render_type(&integer, None, "orders", false), "numeric(8)");
     }
 
     #[test]
     fn an_inline_enum_column_references_the_synthesized_enum_name() {
         let mut status = col("status", "enum");
         status.enum_values = Some(vec!["pending".to_string(), "shipped".to_string()]);
-        assert_eq!(render_type(&status, "orders"), "orders_status");
+        assert_eq!(render_type(&status, None, "orders", false), "orders_status");
+    }
+
+    #[test]
+    fn a_multi_schema_enum_reference_is_qualified_like_its_enum_block() {
+        let mut status = col("status", "enum");
+        status.enum_values = Some(vec!["pending".to_string(), "shipped".to_string()]);
+
+        // qualify=true is what to_dbml sets for a multi-schema snapshot. The
+        // column's type must match render_enum's block name exactly, or the
+        // reference dangles.
+        let reference = render_type(&status, Some("public"), "orders", true);
+
+        let block = DocEnum {
+            schema: Some("public".to_string()),
+            name: "orders_status".to_string(),
+            values: vec!["pending".to_string()],
+            note: None,
+            synthesized: true,
+        };
+        let rendered_block = render_enum(&block, true);
+
+        assert!(
+            rendered_block.contains(&reference),
+            "column reference {reference} must appear as the Enum block name in:\n{rendered_block}"
+        );
     }
 
     use crate::docs::{ColumnNote, DocTable, NoteSource, SnapshotWarning, TableKind};
