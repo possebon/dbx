@@ -75,7 +75,14 @@ pub(crate) fn render_default(column: &ColumnInfo) -> Option<String> {
 
 /// DBML does not validate type names, so native types pass through intact.
 /// Precision is reconstructed only when the engine reported a bare type.
-pub(crate) fn render_type(column: &ColumnInfo) -> String {
+pub(crate) fn render_type(column: &ColumnInfo, table_name: &str) -> String {
+    // A column carrying inline enum values (MySQL `ENUM(...)`) is emitted as a
+    // named enum elsewhere in the document; the column must reference that name
+    // rather than repeat the inline type, or the Enum block is an orphan.
+    if column.enum_values.as_ref().is_some_and(|values| !values.is_empty()) {
+        return quote_identifier(&format!("{table_name}_{}", column.name));
+    }
+
     let base = column.data_type.trim();
     if base.contains('(') {
         return base.to_string();
@@ -148,7 +155,12 @@ pub(crate) fn render_table(table: &DocTable, qualify: bool, warnings: &mut Vec<S
     for column in &table.columns {
         let settings = column_settings(column, table);
         let rendered_settings = if settings.is_empty() { String::new() } else { format!(" [{}]", settings.join(", ")) };
-        out.push_str(&format!("  {} {}{}\n", quote_identifier(&column.name), render_type(column), rendered_settings));
+        out.push_str(&format!(
+            "  {} {}{}\n",
+            quote_identifier(&column.name),
+            render_type(column, &table.name),
+            rendered_settings
+        ));
     }
 
     let emittable: Vec<&IndexInfo> = table
@@ -398,26 +410,33 @@ mod tests {
 
     #[test]
     fn types_pass_through_verbatim_when_already_parameterised() {
-        assert_eq!(render_type(&col("total", "numeric(10,2)")), "numeric(10,2)");
-        assert_eq!(render_type(&col("meta", "jsonb")), "jsonb");
-        assert_eq!(render_type(&col("at", "timestamp with time zone")), "timestamp with time zone");
+        assert_eq!(render_type(&col("total", "numeric(10,2)"), "orders"), "numeric(10,2)");
+        assert_eq!(render_type(&col("meta", "jsonb"), "orders"), "jsonb");
+        assert_eq!(render_type(&col("at", "timestamp with time zone"), "orders"), "timestamp with time zone");
     }
 
     #[test]
     fn bare_types_are_reconstructed_from_precision_metadata() {
         let mut varchar = col("email", "character varying");
         varchar.character_maximum_length = Some(255);
-        assert_eq!(render_type(&varchar), "character varying(255)");
+        assert_eq!(render_type(&varchar, "orders"), "character varying(255)");
 
         let mut decimal = col("total", "numeric");
         decimal.numeric_precision = Some(10);
         decimal.numeric_scale = Some(2);
-        assert_eq!(render_type(&decimal), "numeric(10,2)");
+        assert_eq!(render_type(&decimal, "orders"), "numeric(10,2)");
 
         let mut integer = col("count", "numeric");
         integer.numeric_precision = Some(8);
         integer.numeric_scale = Some(0);
-        assert_eq!(render_type(&integer), "numeric(8)");
+        assert_eq!(render_type(&integer, "orders"), "numeric(8)");
+    }
+
+    #[test]
+    fn an_inline_enum_column_references_the_synthesized_enum_name() {
+        let mut status = col("status", "enum");
+        status.enum_values = Some(vec!["pending".to_string(), "shipped".to_string()]);
+        assert_eq!(render_type(&status, "orders"), "orders_status");
     }
 
     use crate::docs::{ColumnNote, DocTable, NoteSource, SnapshotWarning, TableKind};

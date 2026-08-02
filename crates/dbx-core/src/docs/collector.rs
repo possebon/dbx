@@ -11,7 +11,7 @@ use crate::docs::{
 };
 use crate::models::connection::ConnectionConfig;
 use crate::schema;
-use crate::table_structure_sql::supports_comments;
+use crate::table_structure_sql::{supports_comments, supports_foreign_keys};
 use crate::types::ColumnInfo;
 
 /// Concurrent per-table metadata fetches. Bounded so documenting a large
@@ -90,6 +90,9 @@ pub async fn collect_snapshot(
     if !supports_comments(connection.db_type) {
         warnings.push(SnapshotWarning::CommentsUnsupported { engine: engine.clone() });
     }
+    if !supports_foreign_keys(connection.db_type) {
+        warnings.push(SnapshotWarning::NoForeignKeyMetadata { engine: engine.clone() });
+    }
 
     let schemas = if options.schemas.is_empty() {
         schema::list_schemas_core(state, connection_id, &options.database).await.unwrap_or_default()
@@ -130,71 +133,96 @@ pub async fn collect_snapshot(
     let total = targets.len();
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_TABLES));
 
-    let collected: Vec<Result<DocTable, SnapshotWarning>> = stream::iter(targets.into_iter().enumerate())
-        .map(|(index, (schema_name, info))| {
-            let semaphore = Arc::clone(&semaphore);
-            let database = options.database.clone();
-            async move {
-                let _permit = semaphore.acquire().await.map_err(|_| SnapshotWarning::TableSkipped {
-                    table: info.name.clone(),
-                    reason: "collection cancelled".to_string(),
-                })?;
-
-                if cancelled(cancel) {
-                    return Err(SnapshotWarning::TableSkipped {
+    let collected: Vec<Result<(DocTable, Vec<SnapshotWarning>), SnapshotWarning>> =
+        stream::iter(targets.into_iter().enumerate())
+            .map(|(index, (schema_name, info))| {
+                let semaphore = Arc::clone(&semaphore);
+                let database = options.database.clone();
+                async move {
+                    let _permit = semaphore.acquire().await.map_err(|_| SnapshotWarning::TableSkipped {
                         table: info.name.clone(),
-                        reason: "cancelled".to_string(),
-                    });
-                }
-
-                progress(CollectProgress { completed: index, total, current: format!("{schema_name}.{}", info.name) });
-
-                let columns = schema::get_columns_core(state, connection_id, &database, &schema_name, &info.name)
-                    .await
-                    .map_err(|error| SnapshotWarning::TableSkipped {
-                        table: format!("{schema_name}.{}", info.name),
-                        reason: error,
+                        reason: "collection cancelled".to_string(),
                     })?;
 
-                // Indexes and foreign keys degrade to empty rather than failing
-                // the table: ClickHouse and friends have no FK metadata at all.
-                let indexes = schema::list_indexes_core(state, connection_id, &database, &schema_name, &info.name)
-                    .await
-                    .unwrap_or_default();
-                let foreign_keys =
-                    schema::list_foreign_keys_core(state, connection_id, &database, &schema_name, &info.name)
+                    if cancelled(cancel) {
+                        return Err(SnapshotWarning::TableSkipped {
+                            table: info.name.clone(),
+                            reason: "cancelled".to_string(),
+                        });
+                    }
+
+                    progress(CollectProgress {
+                        completed: index,
+                        total,
+                        current: format!("{schema_name}.{}", info.name),
+                    });
+
+                    let columns = schema::get_columns_core(state, connection_id, &database, &schema_name, &info.name)
+                        .await
+                        .map_err(|error| SnapshotWarning::TableSkipped {
+                            table: format!("{schema_name}.{}", info.name),
+                            reason: error,
+                        })?;
+
+                    // Indexes degrade to empty rather than failing the table.
+                    let indexes = schema::list_indexes_core(state, connection_id, &database, &schema_name, &info.name)
                         .await
                         .unwrap_or_default();
 
-                Ok(DocTable {
-                    schema: (!schema_name.is_empty()).then(|| schema_name.clone()),
-                    name: info.name.clone(),
-                    kind: table_kind_from(&info.table_type),
-                    columns,
-                    indexes,
-                    foreign_keys,
-                    group_id: None,
-                    note: info.comment.clone().filter(|value| !value.trim().is_empty()),
-                    note_source: if info.comment.as_deref().is_some_and(|v| !v.trim().is_empty()) {
-                        NoteSource::Database
-                    } else {
-                        NoteSource::None
-                    },
-                    shadowed_note: None,
-                    column_notes: BTreeMap::new(),
-                    estimated_rows: None,
-                    view_definition: None,
-                })
-            }
-        })
-        .buffer_unordered(MAX_CONCURRENT_TABLES)
-        .collect()
-        .await;
+                    // Foreign keys also degrade to empty rather than failing the
+                    // table, but a real query failure must not look identical to
+                    // "this table genuinely has no foreign keys" — it is reported
+                    // as its own warning instead of being silently discarded.
+                    let mut table_warnings = Vec::new();
+                    let foreign_keys =
+                        match schema::list_foreign_keys_core(state, connection_id, &database, &schema_name, &info.name)
+                            .await
+                        {
+                            Ok(keys) => keys,
+                            Err(error) => {
+                                table_warnings.push(SnapshotWarning::TableSkipped {
+                                    table: format!("{schema_name}.{}", info.name),
+                                    reason: format!("foreign keys unavailable: {error}"),
+                                });
+                                Vec::new()
+                            }
+                        };
+
+                    Ok((
+                        DocTable {
+                            schema: (!schema_name.is_empty()).then(|| schema_name.clone()),
+                            name: info.name.clone(),
+                            kind: table_kind_from(&info.table_type),
+                            columns,
+                            indexes,
+                            foreign_keys,
+                            group_id: None,
+                            note: info.comment.clone().filter(|value| !value.trim().is_empty()),
+                            note_source: if info.comment.as_deref().is_some_and(|v| !v.trim().is_empty()) {
+                                NoteSource::Database
+                            } else {
+                                NoteSource::None
+                            },
+                            shadowed_note: None,
+                            column_notes: BTreeMap::new(),
+                            estimated_rows: None,
+                            view_definition: None,
+                        },
+                        table_warnings,
+                    ))
+                }
+            })
+            .buffer_unordered(MAX_CONCURRENT_TABLES)
+            .collect()
+            .await;
 
     let mut tables = Vec::new();
     for outcome in collected {
         match outcome {
-            Ok(table) => tables.push(table),
+            Ok((table, table_warnings)) => {
+                tables.push(table);
+                warnings.extend(table_warnings);
+            }
             Err(warning) => warnings.push(warning),
         }
     }
@@ -211,9 +239,6 @@ pub async fn collect_snapshot(
     }
 
     let relationships = build_relationships(&tables);
-    if relationships.is_empty() && tables.iter().any(|t| !t.columns.is_empty()) {
-        warnings.push(SnapshotWarning::NoForeignKeyMetadata { engine: engine.clone() });
-    }
 
     progress(CollectProgress { completed: total, total, current: String::new() });
 
@@ -299,5 +324,12 @@ mod tests {
             ..Default::default()
         };
         assert!(synthesize_enum(Some("public"), "orders", &column).is_none());
+    }
+
+    #[test]
+    fn foreign_key_warning_depends_on_engine_capability_not_on_relationship_count() {
+        // A capable engine must NOT be reported as lacking FK metadata just
+        // because the schema happens to have no relationships.
+        assert!(supports_foreign_keys(crate::models::connection::DatabaseType::Postgres));
     }
 }

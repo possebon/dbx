@@ -43,3 +43,10 @@ pub fn build_table_structure_change_sql(options: TableStructureSqlOptions) -> Ta
 pub(crate) fn supports_comments(database_type: crate::models::connection::DatabaseType) -> bool {
     dialect::capabilities_for(Some(database_type)).comment
 }
+
+/// Whether this engine reports foreign key metadata at all. Engines like
+/// ClickHouse and Doris do not, so their ER diagrams have no edges by
+/// necessity rather than by accident.
+pub(crate) fn supports_foreign_keys(database_type: crate::models::connection::DatabaseType) -> bool {
+    dialect::capabilities_for(Some(database_type)).foreign_key
+}
