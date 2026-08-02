@@ -1,4 +1,5 @@
-use crate::docs::{DocTable, SnapshotWarning};
+use crate::docs::hue_to_hex;
+use crate::docs::{Cardinality, DocEnum, DocTable, FieldRef, Relationship, SnapshotWarning, TableGroup};
 use crate::types::{ColumnInfo, IndexInfo};
 
 /// DBML accepts bare identifiers matching `[A-Za-z_][A-Za-z0-9_]*`;
@@ -184,6 +185,75 @@ pub(crate) fn render_table(table: &DocTable, qualify: bool, warnings: &mut Vec<S
     }
 
     if let Some(note) = table.note.as_deref().filter(|value| !value.trim().is_empty()) {
+        out.push_str(&format!("\n  Note: {}\n", render_note(note)));
+    }
+
+    out.push_str("}\n");
+    out
+}
+
+fn qualified_field(field: &FieldRef, qualify: bool) -> String {
+    let table = qualified(field.schema.as_deref(), &field.table, qualify);
+    format!("{table}.{}", quote_identifier(&field.column))
+}
+
+/// One `Ref` line. `>` is many-to-one, `-` is one-to-one.
+pub(crate) fn render_ref(relationship: &Relationship, qualify: bool) -> String {
+    let operator = match relationship.cardinality {
+        Cardinality::ManyToOne => ">",
+        Cardinality::OneToOne => "-",
+    };
+
+    let mut actions = Vec::new();
+    if let Some(update) = relationship.on_update.as_deref().filter(|v| !v.trim().is_empty()) {
+        actions.push(format!("update: {}", update.to_lowercase()));
+    }
+    if let Some(delete) = relationship.on_delete.as_deref().filter(|v| !v.trim().is_empty()) {
+        actions.push(format!("delete: {}", delete.to_lowercase()));
+    }
+    let settings = if actions.is_empty() { String::new() } else { format!(" [{}]", actions.join(", ")) };
+
+    let label = match relationship.name.as_deref().filter(|v| !v.trim().is_empty()) {
+        Some(name) => format!("Ref {}", quote_identifier(name)),
+        None => "Ref".to_string(),
+    };
+
+    format!(
+        "{label}: {} {operator} {}{settings}\n",
+        qualified_field(&relationship.from, qualify),
+        qualified_field(&relationship.to, qualify)
+    )
+}
+
+pub(crate) fn render_enum(value: &DocEnum, qualify: bool) -> String {
+    let name = qualified(value.schema.as_deref(), &value.name, qualify);
+
+    let mut out = format!("Enum {name} {{\n");
+    for variant in &value.values {
+        out.push_str(&format!("  {}\n", quote_identifier(variant)));
+    }
+    if let Some(note) = value.note.as_deref().filter(|v| !v.trim().is_empty()) {
+        out.push_str(&format!("\n  Note: {}\n", render_note(note)));
+    }
+    out.push_str("}\n");
+    out
+}
+
+/// A `TableGroup` block. Returns an empty string when the group has no
+/// members, since DBML rejects an empty group body.
+pub(crate) fn render_group(group: &TableGroup, members: &[&DocTable], qualify: bool) -> String {
+    if members.is_empty() {
+        return String::new();
+    }
+
+    let mut out = format!("TableGroup {} [color: {}] {{\n", quote_identifier(&group.name), hue_to_hex(group.hue));
+
+    for member in members {
+        let name = qualified(member.schema.as_deref(), &member.name, qualify);
+        out.push_str(&format!("  {name}\n"));
+    }
+
+    if let Some(note) = group.note.as_deref().filter(|v| !v.trim().is_empty()) {
         out.push_str(&format!("\n  Note: {}\n", render_note(note)));
     }
 
@@ -441,5 +511,95 @@ mod tests {
             }
             other => panic!("unexpected warning: {other:?}"),
         }
+    }
+
+    use crate::docs::{Cardinality, DocEnum, FieldRef, Relationship, TableGroup};
+
+    fn relationship(cardinality: Cardinality) -> Relationship {
+        Relationship {
+            id: "r1".to_string(),
+            name: Some("fk_orders_user".to_string()),
+            from: FieldRef {
+                schema: Some("public".to_string()),
+                table: "orders".to_string(),
+                column: "user_id".to_string(),
+            },
+            to: FieldRef { schema: Some("public".to_string()), table: "users".to_string(), column: "id".to_string() },
+            cardinality,
+            on_update: None,
+            on_delete: Some("CASCADE".to_string()),
+        }
+    }
+
+    #[test]
+    fn many_to_one_uses_the_gt_operator() {
+        let out = render_ref(&relationship(Cardinality::ManyToOne), false);
+        assert_eq!(out, "Ref fk_orders_user: orders.user_id > users.id [delete: cascade]\n");
+    }
+
+    #[test]
+    fn one_to_one_uses_the_dash_operator() {
+        let out = render_ref(&relationship(Cardinality::OneToOne), false);
+        assert!(out.contains("orders.user_id - users.id"), "got {out}");
+    }
+
+    #[test]
+    fn refs_qualify_both_sides_together() {
+        let out = render_ref(&relationship(Cardinality::ManyToOne), true);
+        assert!(out.contains("public.orders.user_id > public.users.id"), "got {out}");
+    }
+
+    #[test]
+    fn referential_actions_are_lowercased_and_both_emitted() {
+        let mut rel = relationship(Cardinality::ManyToOne);
+        rel.on_update = Some("NO ACTION".to_string());
+        rel.on_delete = Some("RESTRICT".to_string());
+        let out = render_ref(&rel, false);
+        assert!(out.contains("[update: no action, delete: restrict]"), "got {out}");
+    }
+
+    #[test]
+    fn an_unnamed_ref_omits_the_name() {
+        let mut rel = relationship(Cardinality::ManyToOne);
+        rel.name = None;
+        assert!(render_ref(&rel, false).starts_with("Ref: orders.user_id"), "got {}", render_ref(&rel, false));
+    }
+
+    #[test]
+    fn renders_an_enum_block() {
+        let value = DocEnum {
+            schema: Some("public".to_string()),
+            name: "order_status".to_string(),
+            values: vec!["pending".to_string(), "shipped".to_string()],
+            note: None,
+            synthesized: false,
+        };
+        let out = render_enum(&value, false);
+        assert_eq!(out, "Enum order_status {\n  pending\n  shipped\n}\n");
+    }
+
+    #[test]
+    fn renders_a_table_group_with_colour_and_note() {
+        let group = TableGroup {
+            id: "order-management".to_string(),
+            name: "Order Management".to_string(),
+            hue: 28,
+            note: Some("Checkout to carrier handoff.".to_string()),
+        };
+        let orders = doc_table("orders", vec![], vec![]);
+        let items = doc_table("order_items", vec![], vec![]);
+
+        let out = render_group(&group, &[&orders, &items], false);
+
+        assert!(out.starts_with("TableGroup \"Order Management\" [color: #"), "got:\n{out}");
+        assert!(out.contains("\n  orders\n"), "got:\n{out}");
+        assert!(out.contains("\n  order_items\n"), "got:\n{out}");
+        assert!(out.contains("Note: '''Checkout to carrier handoff.'''"), "got:\n{out}");
+    }
+
+    #[test]
+    fn an_empty_group_renders_nothing() {
+        let group = TableGroup { id: "empty".to_string(), name: "Empty".to_string(), hue: 0, note: None };
+        assert_eq!(render_group(&group, &[], false), "");
     }
 }
