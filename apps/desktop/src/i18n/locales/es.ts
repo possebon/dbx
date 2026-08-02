@@ -35,6 +35,7 @@ export default withEnglishFallback({
     stopExplain: "Detener análisis",
     autotrace: "Autotrace (ejecuta la consulta)",
     explainAnalyze: "EXPLAIN ANALYZE (ejecuta la consulta)",
+    actualPlan: "Plan de ejecución real (SET STATISTICS XML)",
     formatSql: "Formatear SQL",
     formatSqlFailed: "Error al formatear el SQL",
     formatAutoDetectFailed: "No se pudo reconocer ni formatear el contenido seleccionado",

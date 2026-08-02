@@ -60,11 +60,17 @@ export function parsePlanNumber(value?: string): number | undefined {
 }
 
 export function extractActualRows(node: ExplainPlanNode): number | undefined {
+  // Estimates are per execution, so the per-execution detail wins when the engine
+  // reports cumulative actuals (SQL Server). PostgreSQL never emits that key.
+  let total: number | undefined;
   for (const detail of node.details) {
+    const perExecution = detail.match(/Actual Rows Per Execution:\s*(\S+)/i);
+    if (perExecution) return parsePlanNumber(perExecution[1]);
+    if (total !== undefined) continue;
     const match = detail.match(/Actual Rows:\s*(\S+)/i);
-    if (match) return parsePlanNumber(match[1]);
+    if (match) total = parsePlanNumber(match[1]);
   }
-  return undefined;
+  return total;
 }
 
 export interface PlanCanvasNode {

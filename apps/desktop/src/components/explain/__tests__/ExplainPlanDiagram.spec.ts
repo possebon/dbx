@@ -175,6 +175,50 @@ describe("ExplainPlanDiagram", () => {
     expect(inspectorText()).toContain("862.104 ms");
   });
 
+  // Detail strings mirror what parseSqlServerRelOp emits for SET STATISTICS XML;
+  // see lib/__tests__/query/sqlserverActualPlan.spec.ts for the parser contract.
+  it("does not flag a SQL Server node whose cumulative rows only look like an overrun", async () => {
+    await mountDiagram([
+      planNode({
+        id: "0",
+        nodeType: "Nested Loops",
+        cost: "1.2",
+        rows: "1000",
+        details: ["Actual Rows: 1000", "Actual Threads: 3", "Actual Executions: 3"],
+        children: [
+          planNode({
+            id: "1",
+            nodeType: "Index Seek",
+            relation: "dbo.orders",
+            cost: "0.85",
+            rows: "10",
+            // 1000 cumulative rows over 100 executions is 10 per execution, exactly
+            // the estimate. Comparing the raw total would report a bogus x100.
+            details: ["Actual Rows: 1000", "Actual Threads: 3", "Actual Executions: 100", "Actual Rows Per Execution: 10"],
+          }),
+        ],
+      }),
+    ]);
+
+    expect(cardFor("Index Seek").textContent).not.toContain("×");
+    expect(cardFor("Nested Loops").textContent).not.toContain("×");
+  });
+
+  it("still flags a SQL Server node that misestimates per execution", async () => {
+    await mountDiagram([
+      planNode({
+        id: "0",
+        nodeType: "Index Seek",
+        relation: "dbo.orders",
+        cost: "0.85",
+        rows: "10",
+        details: ["Actual Rows: 5000", "Actual Executions: 100", "Actual Rows Per Execution: 50"],
+      }),
+    ]);
+
+    expect(cardFor("Index Seek").textContent).toContain("×5.0");
+  });
+
   it("keeps the zoom controls inside their range", async () => {
     await mountDiagram();
 

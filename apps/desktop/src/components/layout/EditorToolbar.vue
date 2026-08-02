@@ -104,9 +104,18 @@ const supportsTransaction = computed(() => supportsTransactionFeature(props.acti
 const hasDefaultDatabaseOption = computed(() => activeDatabaseOptions.value.includes(""));
 const schemaDatabaseKey = computed(() => props.activeTab.database || (isSingleDb.value ? "_" : ""));
 const saveTooltip = computed(() => (props.activeTab.objectSource ? t("objects.saveSource") : t("toolbar.saveSql")));
-// DM calls it autotrace, Postgres calls it EXPLAIN ANALYZE; both execute the statement.
-const supportsExplainAnalyze = computed(() => props.activeConnection?.db_type === "dameng" || props.activeConnection?.db_type === "postgres");
-const explainAnalyzeTooltip = computed(() => (props.activeConnection?.db_type === "postgres" ? t("toolbar.explainAnalyze") : t("toolbar.autotrace")));
+// DM calls it autotrace, Postgres EXPLAIN ANALYZE, SQL Server the actual execution
+// plan (SET STATISTICS XML); all three execute the statement.
+const supportsExplainAnalyze = computed(() => {
+  const dbType = props.activeConnection?.db_type;
+  return dbType === "dameng" || dbType === "postgres" || dbType === "sqlserver";
+});
+const explainAnalyzeTooltip = computed(() => {
+  const dbType = props.activeConnection?.db_type;
+  if (dbType === "postgres") return t("toolbar.explainAnalyze");
+  if (dbType === "sqlserver") return t("toolbar.actualPlan");
+  return t("toolbar.autotrace");
+});
 const canSaveSql = computed(() => !!props.activeTab.externalSqlPath || !!props.activeTab.sql.trim());
 const keywordCaseIsLower = computed(() => props.sqlKeywordCase === "lower");
 const keywordCaseToggleTooltip = computed(() => (keywordCaseIsLower.value ? t("toolbar.keywordCaseUpper") : t("toolbar.keywordCaseLower")));
@@ -245,7 +254,7 @@ async function changeCatalog(selectedCatalog: string) {
         </TooltipTrigger>
         <TooltipContent>{{ activeTab.isExplaining ? t("toolbar.stopExplain") : t("toolbar.explainPlan") }}</TooltipContent>
       </Tooltip>
-      <!-- Autotrace (DM) / EXPLAIN ANALYZE (Postgres) toggle -->
+      <!-- Autotrace (DM) / EXPLAIN ANALYZE (Postgres) / actual plan (SQL Server) toggle -->
       <Tooltip v-if="supportsExplainAnalyze">
         <TooltipTrigger as-child>
           <Button

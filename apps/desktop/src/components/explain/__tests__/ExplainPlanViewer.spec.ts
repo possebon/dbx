@@ -27,11 +27,14 @@ describe("ExplainPlanViewer canvas view", () => {
     }
   });
 
-  it("derives the Postgres ANALYZE chip from parsed nodes, not the raw plan text", () => {
+  it("derives the measured-rows chip from parsed nodes, not the raw plan text", () => {
     expect(viewerSource).toContain('import { extractActualRows } from "@/lib/diagram/planCanvas";');
-    expect(viewerSource).toContain('const hasPostgresAnalyze = computed(() => props.plan?.databaseType === "postgres" && flattenExplainPlanNodes(props.plan.nodes).some((node) => extractActualRows(node) !== undefined));');
-    expect(viewerSource).toContain('<span v-if="hasPostgresAnalyze"');
-    expect(viewerSource).toContain(">ANALYZE</span>");
+    expect(viewerSource).toContain("const measuredRowsLabel = computed(() => {");
+    expect(viewerSource).toContain('if (databaseType !== "postgres" && databaseType !== "sqlserver") return undefined;');
+    expect(viewerSource).toContain("if (!flattenExplainPlanNodes(props.plan!.nodes).some((node) => extractActualRows(node) !== undefined)) return undefined;");
+    expect(viewerSource).toContain('return databaseType === "sqlserver" ? "ACTUAL" : "ANALYZE";');
+    expect(viewerSource).toContain('<span v-if="measuredRowsLabel"');
+    expect(viewerSource).toContain("{{ measuredRowsLabel }}</span>");
     // The Dameng A-TRACE chip keeps its own raw-text condition.
     expect(viewerSource).toContain("plan?.databaseType === 'dameng' && isRawString && rawContent.includes('->')");
   });

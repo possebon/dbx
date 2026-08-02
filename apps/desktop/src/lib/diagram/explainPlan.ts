@@ -455,6 +455,7 @@ function parseSqlServerRelOp(element: Element): ExplainPlanNode {
     element.getAttribute("EstimateIO") ? `Estimated I/O: ${element.getAttribute("EstimateIO")}` : "",
     element.getAttribute("EstimateCPU") ? `Estimated CPU: ${element.getAttribute("EstimateCPU")}` : "",
     ...expressions.slice(0, 3).map((expression) => `Expression: ${expression}`),
+    ...sqlServerRuntimeDetails(sqlServerRuntimeCounters(element)),
   ].filter(Boolean);
 
   return {
@@ -469,6 +470,71 @@ function parseSqlServerRelOp(element: Element): ExplainPlanNode {
     details,
     children: planRegionElements(element, "RelOp").map(parseSqlServerRelOp),
   };
+}
+
+interface SqlServerRuntimeCounters {
+  rows: number;
+  executions: number;
+  threads: number;
+  /** Set only when the operator was genuinely invoked more than once per thread. */
+  rowsPerExecution?: number;
+  elapsedMs?: number;
+  cpuMs?: number;
+}
+
+/**
+ * Aggregates the `SET STATISTICS XML` runtime counters of one operator across its
+ * threads: rows and executions are summed, elapsed time is wall clock per thread so
+ * the slowest thread is the operator duration, and CPU time is additive work so it
+ * is summed. Estimated plans carry no RunTimeInformation and yield undefined.
+ */
+function sqlServerRuntimeCounters(element: Element): SqlServerRuntimeCounters | undefined {
+  const perThread = planRegionElements(element, "RunTimeCountersPerThread");
+  if (perThread.length === 0) return undefined;
+
+  const counters: SqlServerRuntimeCounters = { rows: 0, executions: 0, threads: perThread.length };
+  let activeThreads = 0;
+  for (const thread of perThread) {
+    const executions = xmlNumberAttribute(thread, "ActualExecutions") ?? 0;
+    counters.rows += xmlNumberAttribute(thread, "ActualRows") ?? 0;
+    counters.executions += executions;
+    if (executions > 0) activeThreads += 1;
+    const elapsed = xmlNumberAttribute(thread, "ActualElapsedms");
+    if (elapsed !== undefined) counters.elapsedMs = Math.max(counters.elapsedMs ?? 0, elapsed);
+    const cpu = xmlNumberAttribute(thread, "ActualCPUms");
+    if (cpu !== undefined) counters.cpuMs = (counters.cpuMs ?? 0) + cpu;
+  }
+
+  // ActualRows is cumulative over executions while EstimateRows stays per execution,
+  // so repeated invocations (a nested loop inner side) need normalizing. A parallel
+  // operator reports one execution per worker thread, which is still one logical
+  // execution: dividing there would understate every parallel node instead.
+  const executionsPerThread = counters.executions / (activeThreads || counters.threads);
+  if (executionsPerThread > 1) counters.rowsPerExecution = counters.rows / counters.executions;
+  return counters;
+}
+
+function sqlServerRuntimeDetails(counters?: SqlServerRuntimeCounters): string[] {
+  if (!counters) return [];
+
+  const details = [`Actual Rows: ${counters.rows}`];
+  if (counters.threads > 1) details.push(`Actual Threads: ${counters.threads}`);
+  if (counters.executions > 1) details.push(`Actual Executions: ${counters.executions}`);
+  if (counters.rowsPerExecution !== undefined) details.push(`Actual Rows Per Execution: ${formatPlanMetric(counters.rowsPerExecution)}`);
+  if (counters.elapsedMs !== undefined) details.push(`Actual Time: ${formatPlanMetric(counters.elapsedMs)} ms`);
+  if (counters.cpuMs !== undefined) details.push(`Actual CPU: ${formatPlanMetric(counters.cpuMs)} ms`);
+  return details;
+}
+
+function formatPlanMetric(value: number): string {
+  return String(Number(value.toFixed(2)));
+}
+
+function xmlNumberAttribute(element: Element, attribute: string): number | undefined {
+  const raw = element.getAttribute(attribute);
+  if (raw === null || raw.trim() === "") return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : undefined;
 }
 
 function planRegionElements(root: Element, localName: string): Element[] {

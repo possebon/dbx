@@ -34,6 +34,7 @@ export default withEnglishFallback({
     stopExplain: "Interrompi spiegazione",
     autotrace: "Autotrace (esegue la query)",
     explainAnalyze: "EXPLAIN ANALYZE (esegue la query)",
+    actualPlan: "Piano di esecuzione effettivo (SET STATISTICS XML)",
     formatSql: "Formatta SQL",
     formatSqlFailed: "Impossibile formattare SQL",
     formatAutoDetectFailed: "Impossibile riconoscere o formattare il contenuto selezionato",

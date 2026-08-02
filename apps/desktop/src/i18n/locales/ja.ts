@@ -35,6 +35,7 @@ export default withEnglishFallback({
     stopExplain: "実行計画の表示を停止",
     autotrace: "オートトレース (クエリを実行します)",
     explainAnalyze: "EXPLAIN ANALYZE (クエリを実行します)",
+    actualPlan: "実際の実行プラン (SET STATISTICS XML)",
     formatSql: "SQLをフォーマット",
     formatSqlFailed: "SQLのフォーマットに失敗しました",
     formatAutoDetectFailed: "選択内容を認識またはフォーマットできません",

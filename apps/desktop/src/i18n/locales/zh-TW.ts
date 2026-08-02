@@ -35,6 +35,7 @@ export default withEnglishFallback({
     stopExplain: "停止執行計畫",
     autotrace: "Autotrace (會執行查詢)",
     explainAnalyze: "EXPLAIN ANALYZE (會執行查詢)",
+    actualPlan: "實際執行計畫 (SET STATISTICS XML)",
     formatSql: "格式化 SQL",
     formatSqlFailed: "SQL 格式化失敗",
     formatAutoDetectFailed: "無法識別或格式化所選內容",
