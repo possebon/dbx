@@ -20,6 +20,10 @@ pub struct ExplainSqlOptions {
     /// Omitted formats retain the existing JSON behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<ExplainFormat>,
+    /// PostgreSQL only: run the statement and report measured rows/timings.
+    /// Every other engine ignores the flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyze: Option<bool>,
     pub sql: String,
 }
 
@@ -58,6 +62,11 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
     }
 
     let sql = match options.database_type {
+        // ANALYZE executes the statement; is_safe_explain_sql has already limited
+        // the source to SELECT/WITH/TABLE/VALUES. MongoDb shares the plain arm only.
+        Some(DatabaseType::Postgres) if options.analyze == Some(true) => {
+            format!("EXPLAIN (ANALYZE, FORMAT JSON) {source}")
+        }
         Some(DatabaseType::Postgres | DatabaseType::MongoDb) => {
             format!("EXPLAIN (FORMAT JSON) {source}")
         }
@@ -765,6 +774,7 @@ mod tests {
         let result = build_explain_sql(ExplainSqlOptions {
             database_type: Some(DatabaseType::Postgres),
             format: None,
+            analyze: None,
             sql: " select * from users where id = 1; ".to_string(),
         });
 
@@ -779,10 +789,91 @@ mod tests {
     }
 
     #[test]
+    fn builds_postgres_analyze_explain_sql() {
+        let result = build_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::Postgres),
+            format: None,
+            analyze: Some(true),
+            sql: " select * from users where id = 1; ".to_string(),
+        });
+
+        assert_eq!(
+            result,
+            ExplainSqlBuildResult {
+                ok: true,
+                sql: Some("EXPLAIN (ANALYZE, FORMAT JSON) select * from users where id = 1".to_string()),
+                reason: None,
+            }
+        );
+
+        // analyze: Some(false) must behave exactly like the omitted flag.
+        assert_eq!(
+            build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                format: None,
+                analyze: Some(false),
+                sql: "SELECT 1".to_string(),
+            })
+            .sql,
+            Some("EXPLAIN (FORMAT JSON) SELECT 1".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_analyze_for_every_engine_but_postgres() {
+        for (db_type, expected) in [
+            (DatabaseType::MongoDb, "EXPLAIN (FORMAT JSON) SELECT 1"),
+            (DatabaseType::Mysql, "EXPLAIN FORMAT=JSON SELECT 1"),
+            (DatabaseType::Dameng, "EXPLAIN SELECT 1"),
+            (DatabaseType::Questdb, "EXPLAIN SELECT 1"),
+            (DatabaseType::Oracle, "EXPLAIN PLAN FOR SELECT 1"),
+        ] {
+            let analyzed = build_explain_sql(ExplainSqlOptions {
+                database_type: Some(db_type),
+                format: None,
+                analyze: Some(true),
+                sql: "SELECT 1".to_string(),
+            });
+            let plain = build_explain_sql(ExplainSqlOptions {
+                database_type: Some(db_type),
+                format: None,
+                analyze: None,
+                sql: "SELECT 1".to_string(),
+            });
+
+            assert_eq!(analyzed, plain, "{db_type:?} must ignore the analyze flag");
+            // MongoDb is rejected earlier by supports_explain_plan, so it never
+            // reaches the match arm it nominally shares with Postgres.
+            if db_type != DatabaseType::MongoDb {
+                assert_eq!(analyzed.sql, Some(expected.to_string()), "{db_type:?}");
+            } else {
+                assert_eq!(analyzed.reason, Some("unsupported".to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn refuses_analyze_on_non_select_sources() {
+        for sql in ["delete from users", "update users set name = 'x'", "SELECT 1; DROP TABLE users"] {
+            assert_eq!(
+                build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Postgres),
+                    format: None,
+                    analyze: Some(true),
+                    sql: sql.to_string(),
+                }),
+                ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) },
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
     fn builds_dameng_explain_sql() {
         let result = build_explain_sql(ExplainSqlOptions {
             database_type: Some(DatabaseType::Dameng),
             format: None,
+            analyze: None,
             sql: "SELECT * FROM t1 WHERE id = 1".to_string(),
         });
 
@@ -801,6 +892,7 @@ mod tests {
         let result = build_explain_sql(ExplainSqlOptions {
             database_type: Some(DatabaseType::Oracle),
             format: None,
+            analyze: None,
             sql: "WITH rows AS (SELECT 1 AS id FROM dual) SELECT * FROM rows;".to_string(),
         });
 
@@ -819,6 +911,7 @@ mod tests {
         let result = build_explain_sql(ExplainSqlOptions {
             database_type: Some(DatabaseType::SqlServer),
             format: None,
+            analyze: None,
             sql: "WITH rows AS (SELECT 1 AS id) SELECT * FROM rows;".to_string(),
         });
 
@@ -838,6 +931,7 @@ mod tests {
             build_explain_sql(ExplainSqlOptions {
                 database_type: Some(DatabaseType::SqlServer),
                 format: None,
+                analyze: None,
                 sql: "SELECT 1\nGO\nSELECT 2".to_string(),
             }),
             ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) }
@@ -846,6 +940,7 @@ mod tests {
             build_explain_sql(ExplainSqlOptions {
                 database_type: Some(DatabaseType::SqlServer),
                 format: None,
+                analyze: None,
                 sql: "SELECT 'first line\nGO\nlast line' AS text".to_string(),
             })
             .ok
@@ -868,6 +963,7 @@ mod tests {
             build_explain_sql(ExplainSqlOptions {
                 database_type: Some(DatabaseType::Mysql),
                 format: None,
+                analyze: None,
                 sql: "SELECT * FROM users;".to_string(),
             }),
             ExplainSqlBuildResult {
@@ -881,6 +977,7 @@ mod tests {
             build_explain_sql(ExplainSqlOptions {
                 database_type: Some(DatabaseType::Mysql),
                 format: None,
+                analyze: None,
                 sql: "delete from users".to_string(),
             }),
             ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) }
@@ -890,6 +987,7 @@ mod tests {
             build_explain_sql(ExplainSqlOptions {
                 database_type: Some(DatabaseType::Mysql),
                 format: None,
+                analyze: None,
                 sql: "SELECT * FROM users; DELETE FROM users".to_string(),
             }),
             ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) }
@@ -899,6 +997,7 @@ mod tests {
             build_explain_sql(ExplainSqlOptions {
                 database_type: Some(DatabaseType::Mysql),
                 format: Some(ExplainFormat::Standard),
+                analyze: None,
                 sql: "SELECT * FROM users;".to_string(),
             }),
             ExplainSqlBuildResult {

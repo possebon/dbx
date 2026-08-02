@@ -4548,7 +4548,9 @@ export const useQueryStore = defineStore("query", () => {
       return { ok: true as const, sql: built.sql };
     }
 
-    const built = await buildExplainSql(databaseType, sql);
+    // Postgres reuses the autotrace toggle to request EXPLAIN ANALYZE; the backend
+    // safety gate still limits the source to SELECT/WITH/TABLE/VALUES.
+    const built = databaseType === "postgres" && explainMode === "autotrace" ? await buildExplainSql(databaseType, sql, "json", true) : await buildExplainSql(databaseType, sql);
     if (!built.ok) {
       tab.explainPlan = undefined;
       tab.explainError = built.reason;

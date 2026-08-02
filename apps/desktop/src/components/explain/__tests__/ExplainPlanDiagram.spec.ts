@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import i18n from "@/i18n";
 import type { ExplainPlanNode } from "@/lib/diagram/explainPlan";
+import { parseExplainResult } from "@/lib/diagram/explainPlan";
+import type { QueryResult } from "@/types/database";
 import ExplainPlanDiagram from "@/components/explain/ExplainPlanDiagram.vue";
 
 function planNode(node: Partial<ExplainPlanNode> & { id: string; nodeType: string }): ExplainPlanNode {
@@ -137,6 +139,40 @@ describe("ExplainPlanDiagram", () => {
     expect(inspectorText()).toContain("Index scan");
     expect(inspectorText()).toContain("idx_customers_region");
     expect(inspectorText()).not.toContain("Table scan");
+  });
+
+  it("flags the mismatch on a plan parsed from real EXPLAIN ANALYZE output", async () => {
+    const analyzePlan = [
+      {
+        Plan: {
+          "Node Type": "Sort",
+          "Startup Cost": 24000.0,
+          "Total Cost": 24102.11,
+          "Plan Rows": 42000,
+          "Actual Rows": 96000,
+          "Actual Loops": 1,
+          "Actual Startup Time": 812.44,
+          "Actual Total Time": 851.09,
+          Plans: [{ "Node Type": "Seq Scan", "Relation Name": "orders", "Startup Cost": 0.0, "Total Cost": 18000.0, "Plan Rows": 1200000, "Actual Rows": 1187423, "Actual Loops": 1 }],
+        },
+        "Planning Time": 0.482,
+        "Execution Time": 862.104,
+      },
+    ];
+    const result: QueryResult = { columns: ["QUERY PLAN"], rows: [[JSON.stringify(analyzePlan)]], affected_rows: 0, execution_time_ms: 1 };
+
+    await mountDiagram(parseExplainResult("postgres", result).nodes);
+
+    // 96000 measured against 42000 estimated is a 2.3x overrun.
+    expect(cardFor("Sort").textContent).toContain("×2.3");
+    // The scan landed within 1% of its estimate, so it stays unflagged.
+    expect(cardFor("Seq Scan").textContent).not.toContain("×");
+
+    // Planning/Execution time live on the root node, which is not the costliest one.
+    cardFor("Sort").click();
+    await nextTick();
+    expect(inspectorText()).toContain("Planning Time");
+    expect(inspectorText()).toContain("862.104 ms");
   });
 
   it("keeps the zoom controls inside their range", async () => {

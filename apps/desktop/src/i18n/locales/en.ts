@@ -31,6 +31,8 @@ export default {
     stopQuery: "Stop query",
     explainPlan: "Explain plan",
     stopExplain: "Stop explain",
+    autotrace: "Autotrace (executes the query)",
+    explainAnalyze: "EXPLAIN ANALYZE (executes the query)",
     formatSql: "Format SQL",
     formatSqlFailed: "Failed to format SQL",
     formatAutoDetectFailed: "Cannot recognize or format the selected content",

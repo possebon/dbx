@@ -33,6 +33,8 @@ export default withEnglishFallback({
     stopQuery: "쿼리 중지",
     explainPlan: "실행 계획",
     stopExplain: "실행 계획 중지",
+    autotrace: "자동 추적 (쿼리를 실행합니다)",
+    explainAnalyze: "EXPLAIN ANALYZE (쿼리를 실행합니다)",
     formatSql: "SQL 정렬",
     formatSqlFailed: "SQL 정렬에 실패했습니다",
     formatAutoDetectFailed: "선택한 내용을 인식하거나 포맷할 수 없습니다",

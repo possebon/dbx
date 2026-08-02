@@ -29,8 +29,9 @@ export function supportsExplainPlan(databaseType?: DatabaseType): databaseType i
   return !!databaseType && supportsDatabaseFeature(databaseType, "sqlExplain") && SUPPORTED_EXPLAIN_TYPES.has(databaseType);
 }
 
-export function buildExplainSql(databaseType: DatabaseType | undefined, sql: string, format: "json" | "standard" = "json"): Promise<BuildExplainSqlResult> {
-  return api.buildExplainSql({ databaseType, sql, format }) as Promise<BuildExplainSqlResult>;
+/** `analyze` is honored by PostgreSQL only; every other engine ignores it server-side. */
+export function buildExplainSql(databaseType: DatabaseType | undefined, sql: string, format: "json" | "standard" = "json", analyze?: boolean): Promise<BuildExplainSqlResult> {
+  return api.buildExplainSql({ databaseType, sql, format, analyze }) as Promise<BuildExplainSqlResult>;
 }
 
 export function parseExplainResult(databaseType: "mysql" | "postgres" | "dameng" | "questdb" | "sqlserver", result: QueryResult): ParsedExplainPlan {
@@ -662,7 +663,15 @@ function parsePostgresExplain(raw: unknown): ExplainPlanNode[] {
       const root = objectValue(item);
       if (!root) return null;
       const plan = objectValue(root.Plan) || root;
-      return parsePostgresNode(plan, String(index));
+      const node = parsePostgresNode(plan, String(index));
+      if (!node) return null;
+
+      // EXPLAIN ANALYZE reports these next to "Plan", not inside it.
+      const planningTime = numberLike(root["Planning Time"]);
+      const executionTime = numberLike(root["Execution Time"]);
+      if (planningTime !== undefined) node.details.push(`Planning Time: ${planningTime} ms`);
+      if (executionTime !== undefined) node.details.push(`Execution Time: ${executionTime} ms`);
+      return node;
     })
     .filter((node): node is ExplainPlanNode => !!node);
 }
@@ -679,6 +688,11 @@ function parsePostgresNode(plan: Record<string, unknown> | null, id: string): Ex
   const filter = stringValue(plan.Filter);
   const joinType = stringValue(plan["Join Type"]);
   const sortKey = arrayValue(plan["Sort Key"])?.map(String).join(", ");
+  // EXPLAIN ANALYZE only. Actual Rows is per loop, matching Plan Rows.
+  const actualRows = numberLike(plan["Actual Rows"]);
+  const actualLoops = numberLike(plan["Actual Loops"]);
+  const actualStartupTime = numberLike(plan["Actual Startup Time"]);
+  const actualTotalTime = numberLike(plan["Actual Total Time"]);
 
   const children =
     arrayValue(plan.Plans)
@@ -694,7 +708,14 @@ function parsePostgresNode(plan: Record<string, unknown> | null, id: string): Ex
     cost: [startupCost, totalCost].every(Boolean) ? `${startupCost}..${totalCost}` : totalCost,
     rows,
     width,
-    details: [joinType ? `Join: ${joinType}` : "", filter ? `Filter: ${filter}` : "", sortKey ? `Sort: ${sortKey}` : ""].filter(Boolean),
+    details: [
+      joinType ? `Join: ${joinType}` : "",
+      filter ? `Filter: ${filter}` : "",
+      sortKey ? `Sort: ${sortKey}` : "",
+      actualRows !== undefined ? `Actual Rows: ${actualRows}` : "",
+      actualLoops !== undefined && Number(actualLoops) > 1 ? `Actual Loops: ${actualLoops}` : "",
+      actualStartupTime !== undefined && actualTotalTime !== undefined ? `Actual Time: ${actualStartupTime}..${actualTotalTime} ms` : "",
+    ].filter(Boolean),
     children,
   };
 }

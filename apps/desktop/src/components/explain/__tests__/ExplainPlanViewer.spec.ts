@@ -27,6 +27,15 @@ describe("ExplainPlanViewer canvas view", () => {
     }
   });
 
+  it("derives the Postgres ANALYZE chip from parsed nodes, not the raw plan text", () => {
+    expect(viewerSource).toContain('import { extractActualRows } from "@/lib/diagram/planCanvas";');
+    expect(viewerSource).toContain('const hasPostgresAnalyze = computed(() => props.plan?.databaseType === "postgres" && flattenExplainPlanNodes(props.plan.nodes).some((node) => extractActualRows(node) !== undefined));');
+    expect(viewerSource).toContain('<span v-if="hasPostgresAnalyze"');
+    expect(viewerSource).toContain(">ANALYZE</span>");
+    // The Dameng A-TRACE chip keeps its own raw-text condition.
+    expect(viewerSource).toContain("plan?.databaseType === 'dameng' && isRawString && rawContent.includes('->')");
+  });
+
   it("puts the canvas tab first in the view switcher", () => {
     const tabOrder = [...viewerSource.matchAll(/@click="activeView = '(\w+)'"/g)].map((match) => match[1]);
     expect(tabOrder).toEqual(["canvas", "tree", "summary", "raw", "table"]);

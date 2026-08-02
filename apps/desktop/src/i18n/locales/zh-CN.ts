@@ -33,6 +33,8 @@ export default withEnglishFallback({
     stopQuery: "停止执行",
     explainPlan: "执行计划",
     stopExplain: "停止执行计划",
+    autotrace: "Autotrace (会执行查询)",
+    explainAnalyze: "EXPLAIN ANALYZE (会执行查询)",
     formatSql: "格式化 SQL",
     formatSqlFailed: "SQL 格式化失败",
     formatAutoDetectFailed: "无法识别或格式化所选内容",

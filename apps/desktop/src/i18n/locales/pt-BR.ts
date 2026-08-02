@@ -33,6 +33,8 @@ export default withEnglishFallback({
     stopQuery: "Parar consulta",
     explainPlan: "Explicar plano",
     stopExplain: "Parar explicação",
+    autotrace: "Autotrace (executa a query)",
+    explainAnalyze: "EXPLAIN ANALYZE (executa a query)",
     formatSql: "Formatar SQL",
     formatSqlFailed: "Falha ao formatar SQL",
     formatAutoDetectFailed: "Não foi possível reconhecer ou formatar o conteúdo selecionado",
