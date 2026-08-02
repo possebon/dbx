@@ -1,4 +1,5 @@
 pub mod color;
+pub mod dbml;
 pub mod relations;
 pub mod snapshot;
 
