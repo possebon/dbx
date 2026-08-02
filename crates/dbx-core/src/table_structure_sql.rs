@@ -50,3 +50,14 @@ pub(crate) fn supports_comments(database_type: crate::models::connection::Databa
 pub(crate) fn supports_foreign_keys(database_type: crate::models::connection::DatabaseType) -> bool {
     dialect::capabilities_for(Some(database_type)).foreign_key
 }
+
+/// Canonical display label for a database engine (e.g. `postgres`,
+/// `sqlserver`, `mongodb`) — the same identifier already used throughout
+/// this module's own warning prose. The documentation collector uses it for
+/// `database_type` and its engine-capability warnings instead of the Rust
+/// `Debug` spelling (`Postgres`, `SqlServer`, `MongoDb`), which is an
+/// implementation detail, not something a consumer like dbdocs/dbdiagram
+/// should key off.
+pub(crate) fn database_type_label(database_type: crate::models::connection::DatabaseType) -> String {
+    dialect::database_label(Some(database_type))
+}

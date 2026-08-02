@@ -73,15 +73,51 @@ pub(crate) fn render_default(column: &ColumnInfo) -> Option<String> {
     }
 }
 
+/// True when `data_type` is MySQL's inline `ENUM(...)` spelling rather than
+/// a genuine named type. PostgreSQL reports a named enum type's own
+/// identifier in `data_type` instead (e.g. `"ConversationStatus"`) — only
+/// the inline MySQL spelling needs a synthesized name.
+pub(crate) fn is_inline_enum_spelling(data_type: &str) -> bool {
+    let trimmed = data_type.trim();
+    trimmed.get(..5).is_some_and(|prefix| prefix.eq_ignore_ascii_case("enum(")) && trimmed.ends_with(')')
+}
+
+/// PostgreSQL's `format_type` double-quotes an identifier that needs it
+/// (e.g. `"ConversationStatus"`); strip that quoting so the bare name can be
+/// used as a DBML identifier directly — `quote_identifier` re-quotes it if
+/// DBML itself requires that.
+pub(crate) fn unquote_pg_identifier(value: &str) -> String {
+    let trimmed = value.trim();
+    match trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        true => trimmed[1..trimmed.len() - 1].replace("\"\"", "\""),
+        false => trimmed.to_string(),
+    }
+}
+
+/// The enum name a column's `enum_values` refers to: the synthesized
+/// `{table}_{column}` name for MySQL's inline `ENUM(...)` columns, or the
+/// native type name for a genuine named enum type (e.g. PostgreSQL).
+///
+/// This is the single source of truth for that name — `synthesize_enum`
+/// (collector) and `render_type` (below) both go through it, so a column's
+/// type reference and its `Enum` block name can never drift apart again.
+pub(crate) fn enum_type_name(column: &ColumnInfo, table_name: &str) -> String {
+    if is_inline_enum_spelling(&column.data_type) {
+        format!("{table_name}_{}", column.name)
+    } else {
+        unquote_pg_identifier(&column.data_type)
+    }
+}
+
 /// DBML does not validate type names, so native types pass through intact.
 /// Precision is reconstructed only when the engine reported a bare type.
 pub(crate) fn render_type(column: &ColumnInfo, table_schema: Option<&str>, table_name: &str, qualify: bool) -> String {
-    // A column carrying inline enum values (MySQL `ENUM(...)`) is emitted as a
-    // named enum elsewhere in the document. This must produce the SAME string
-    // `render_enum` produces for that block — including schema qualification —
-    // or the reference dangles and the Enum block becomes an orphan.
+    // A column carrying enum values is emitted as a named enum elsewhere in
+    // the document. This must produce the SAME string `render_enum` produces
+    // for that block — including schema qualification — or the reference
+    // dangles and the Enum block becomes an orphan.
     if column.enum_values.as_ref().is_some_and(|values| !values.is_empty()) {
-        return qualified(table_schema, &format!("{table_name}_{}", column.name), qualify);
+        return qualified(table_schema, &enum_type_name(column, table_name), qualify);
     }
 
     let base = column.data_type.trim();
@@ -438,14 +474,34 @@ mod tests {
 
     #[test]
     fn an_inline_enum_column_references_the_synthesized_enum_name() {
-        let mut status = col("status", "enum");
+        let mut status = col("status", "enum('pending','shipped')");
         status.enum_values = Some(vec!["pending".to_string(), "shipped".to_string()]);
         assert_eq!(render_type(&status, None, "orders", false), "orders_status");
     }
 
     #[test]
+    fn a_named_enum_type_column_references_its_own_native_name_not_a_synthesized_one() {
+        // PostgreSQL reports the enum's own type name in `data_type` rather
+        // than an inline `ENUM(...)` spelling — that native name must be
+        // used verbatim, not the `{table}_{column}` scheme MySQL needs.
+        let mut status = col("status", "ConversationStatus");
+        status.enum_values = Some(vec!["open".to_string(), "closed".to_string()]);
+        assert_eq!(render_type(&status, None, "conversations", false), "ConversationStatus");
+    }
+
+    #[test]
+    fn a_quoted_native_enum_type_name_is_unquoted_for_the_reference() {
+        // `format_type` double-quotes an identifier that needs it (mixed
+        // case, here). The DBML reference must be the bare name so
+        // `quote_identifier` can decide on its own quoting.
+        let mut status = col("status", "\"ConversationStatus\"");
+        status.enum_values = Some(vec!["open".to_string()]);
+        assert_eq!(render_type(&status, None, "conversations", false), "ConversationStatus");
+    }
+
+    #[test]
     fn a_multi_schema_enum_reference_is_qualified_like_its_enum_block() {
-        let mut status = col("status", "enum");
+        let mut status = col("status", "enum('pending','shipped')");
         status.enum_values = Some(vec!["pending".to_string(), "shipped".to_string()]);
 
         // qualify=true is what to_dbml sets for a multi-schema snapshot. The
