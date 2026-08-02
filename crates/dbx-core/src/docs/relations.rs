@@ -42,9 +42,13 @@ fn relationship_id(source: &DocTable, foreign_key: &ForeignKeyInfo) -> String {
 }
 
 /// Resolve a foreign key's target against the tables actually present.
-/// Matching prefers an exact schema match and falls back to a bare name
-/// match, because some engines report `ref_schema` as None.
-fn find_target<'a>(tables: &'a [DocTable], foreign_key: &ForeignKeyInfo) -> Option<&'a DocTable> {
+///
+/// Resolution order mirrors SQL's own: an explicit `ref_schema` wins; an
+/// unqualified reference resolves inside the source table's own schema;
+/// only then do we consider a bare-name match elsewhere — and an ambiguous
+/// one is dropped rather than guessed at, because a wrong edge is worse
+/// than a missing one.
+fn find_target<'a>(tables: &'a [DocTable], source: &DocTable, foreign_key: &ForeignKeyInfo) -> Option<&'a DocTable> {
     if let Some(ref_schema) = foreign_key.ref_schema.as_deref().filter(|s| !s.is_empty()) {
         if let Some(found) =
             tables.iter().find(|t| t.name == foreign_key.ref_table && t.schema.as_deref() == Some(ref_schema))
@@ -52,7 +56,17 @@ fn find_target<'a>(tables: &'a [DocTable], foreign_key: &ForeignKeyInfo) -> Opti
             return Some(found);
         }
     }
-    tables.iter().find(|t| t.name == foreign_key.ref_table)
+
+    if let Some(found) = tables.iter().find(|t| t.name == foreign_key.ref_table && t.schema == source.schema) {
+        return Some(found);
+    }
+
+    let mut matches = tables.iter().filter(|t| t.name == foreign_key.ref_table);
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(first)
 }
 
 /// Build the relationship set for a snapshot.
@@ -66,7 +80,7 @@ pub fn build_relationships(tables: &[DocTable]) -> Vec<Relationship> {
 
     for source in tables {
         for foreign_key in &source.foreign_keys {
-            let Some(target) = find_target(tables, foreign_key) else { continue };
+            let Some(target) = find_target(tables, source, foreign_key) else { continue };
 
             if !source.columns.iter().any(|c| c.name == foreign_key.column) {
                 continue;
@@ -278,5 +292,61 @@ mod tests {
         assert_eq!(rels.len(), 2);
         assert_ne!(rels[0].id, rels[1].id);
         assert_eq!(build_relationships(&tables)[0].id, rels[0].id);
+    }
+
+    #[test]
+    fn an_unqualified_foreign_key_resolves_within_the_source_schema() {
+        let mut orders = table(
+            "orders",
+            vec![column("id", true), column("user_id", false)],
+            vec![],
+            vec![ForeignKeyInfo {
+                name: "fk_orders_user".to_string(),
+                column: "user_id".to_string(),
+                ref_schema: None,
+                ref_table: "users".to_string(),
+                ref_column: "id".to_string(),
+                on_update: None,
+                on_delete: None,
+            }],
+        );
+        orders.schema = Some("tenant_a".to_string());
+
+        let mut users_a = table("users", vec![column("id", true)], vec![], vec![]);
+        users_a.schema = Some("tenant_a".to_string());
+        let mut users_b = table("users", vec![column("id", true)], vec![], vec![]);
+        users_b.schema = Some("tenant_b".to_string());
+
+        // tenant_b listed FIRST so a naive first-match would pick the wrong one.
+        let rels = build_relationships(&[users_b, orders, users_a]);
+
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].to.schema.as_deref(), Some("tenant_a"));
+    }
+
+    #[test]
+    fn an_ambiguous_bare_name_reference_is_dropped_rather_than_guessed() {
+        let mut orders = table(
+            "orders",
+            vec![column("id", true), column("user_id", false)],
+            vec![],
+            vec![ForeignKeyInfo {
+                name: "fk_orders_user".to_string(),
+                column: "user_id".to_string(),
+                ref_schema: None,
+                ref_table: "users".to_string(),
+                ref_column: "id".to_string(),
+                on_update: None,
+                on_delete: None,
+            }],
+        );
+        orders.schema = Some("app".to_string());
+
+        let mut users_a = table("users", vec![column("id", true)], vec![], vec![]);
+        users_a.schema = Some("tenant_a".to_string());
+        let mut users_b = table("users", vec![column("id", true)], vec![], vec![]);
+        users_b.schema = Some("tenant_b".to_string());
+
+        assert!(build_relationships(&[orders, users_a, users_b]).is_empty());
     }
 }
