@@ -227,7 +227,7 @@ pub async fn collect_snapshot(
         }
     }
 
-    tables.sort_by(|a, b| a.qualified_name().cmp(&b.qualified_name()));
+    tables.sort_by_key(|table| table.qualified_name());
 
     let mut enums: Vec<DocEnum> = Vec::new();
     for table in &tables {
