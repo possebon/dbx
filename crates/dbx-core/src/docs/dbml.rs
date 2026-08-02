@@ -462,9 +462,12 @@ mod tests {
         };
         let rendered_block = render_enum(&block, true);
 
+        // Anchored, not `contains`: a bare unqualified reference is a substring
+        // of the qualified block name, so `contains` would pass against the very
+        // bug this test exists to catch.
         assert!(
-            rendered_block.contains(&reference),
-            "column reference {reference} must appear as the Enum block name in:\n{rendered_block}"
+            rendered_block.starts_with(&format!("Enum {reference} {{\n")),
+            "column reference `{reference}` must be exactly the Enum block name in:\n{rendered_block}"
         );
     }
 
