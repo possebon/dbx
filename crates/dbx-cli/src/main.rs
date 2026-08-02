@@ -7,6 +7,7 @@ use dbx_core::{
     types::{ColumnInfo, QueryResult, TableInfo},
 };
 use dbx_mcp::{
+    backend::DocsSnapshotOptions,
     mongo::{self, MongoSafetyError},
     DbxBackend, LocalBackend, WebBackend,
 };
@@ -91,6 +92,7 @@ struct Flags {
     max_rows: Option<usize>,
     timeout_ms: Option<u64>,
     file: Option<PathBuf>,
+    out: Option<PathBuf>,
     allow_writes: bool,
     allow_dangerous: bool,
     help: bool,
@@ -222,6 +224,9 @@ async fn run_with_backend(backend: &dyn DbxBackend, flags: Flags) -> Result<Stri
     }
     if args.first().is_some_and(|arg| arg == "context") {
         return run_context(backend, &flags).await;
+    }
+    if args.first().is_some_and(|arg| arg == "dbml") {
+        return run_dbml(backend, &flags).await;
     }
     if args.first().is_some_and(|arg| arg == "open") {
         ensure_arg_count(args, 3, "dbx open")?;
@@ -436,6 +441,37 @@ async fn run_context(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, 
     Ok(output)
 }
 
+async fn run_dbml(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, CliError> {
+    let args = &flags.args;
+    let connection_name = required(args.get(1), "Connection name is required.")?;
+    let connection = find_connection(backend, connection_name).await?;
+    let database = selected_database(&connection, flags.database.as_deref());
+
+    let options = DocsSnapshotOptions {
+        schemas: flags.schema.clone().into_iter().collect(),
+        tables: flags.tables.clone(),
+        project_name: Some(connection.name.clone()),
+    };
+
+    let snapshot = backend.collect_docs_snapshot(&connection, &database, options).await.map_err(command_error)?;
+
+    let output = dbx_core::docs::to_dbml(&snapshot);
+
+    for warning in &output.warnings {
+        eprintln!("warning: {warning:?}");
+    }
+
+    match flags.out.as_ref() {
+        Some(path) => {
+            std::fs::write(path, &output.text).map_err(|error| {
+                CliError::new("WRITE_FAILED", format!("Failed to write {}: {error}", path.display()))
+            })?;
+            Ok(format!("Wrote {} bytes to {}", output.text.len(), path.display()))
+        }
+        None => Ok(output.text),
+    }
+}
+
 async fn find_connection(backend: &dyn DbxBackend, name: &str) -> Result<ConnectionConfig, CliError> {
     backend
         .load_connections()
@@ -461,6 +497,7 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
         max_rows: None,
         timeout_ms: None,
         file: None,
+        out: None,
         allow_writes: false,
         allow_dangerous: false,
         help: false,
@@ -505,6 +542,7 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
                 flags.timeout_ms = Some(duration_ms(&option_value(argv, &mut index, "--timeout")?, "--timeout")?)
             }
             "--file" => flags.file = Some(PathBuf::from(option_value(argv, &mut index, "--file")?)),
+            "--out" => flags.out = Some(PathBuf::from(option_value(argv, &mut index, "--out")?)),
             "--allow-writes" => flags.allow_writes = true,
             "--allow-dangerous-sql" => flags.allow_dangerous = true,
             value if value.starts_with('-') => {
@@ -833,7 +871,7 @@ fn csv_cell(value: &str) -> String {
 }
 
 fn usage() -> &'static str {
-    "Usage:\n  dbx doctor [--json]\n  dbx capabilities [--json]\n  dbx connections list [--json]\n  dbx schema list <connection> [--schema name] [--json]\n  dbx schema describe <connection> <table> [--schema name] [--json]\n  dbx query <connection> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--json]\n  dbx context <connection> [--schema name] [--tables a,b] [--max-tables n] [--json]\n  dbx open <connection> <table> [--schema name] [--database name] [--json]"
+    "Usage:\n  dbx doctor [--json]\n  dbx capabilities [--json]\n  dbx connections list [--json]\n  dbx schema list <connection> [--schema name] [--json]\n  dbx schema describe <connection> <table> [--schema name] [--json]\n  dbx query <connection> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--json]\n  dbx context <connection> [--schema name] [--tables a,b] [--max-tables n] [--json]\n  dbx dbml <connection> [--out path] [--schema name] [--database name] [--tables a,b]\n  dbx open <connection> <table> [--schema name] [--database name] [--json]"
 }
 
 #[cfg(test)]
@@ -1056,5 +1094,23 @@ mod tests {
         ]))
         .unwrap();
         run_with_backend(&backend, cleanup).await.expect("final cleanup");
+    }
+
+    #[test]
+    fn parses_the_out_flag() {
+        let flags = parse_flags(&args(&["dbml", "local", "--out", "schema.dbml"])).expect("parse");
+        assert_eq!(flags.args, args(&["dbml", "local"]));
+        assert_eq!(flags.out.as_deref(), Some(std::path::Path::new("schema.dbml")));
+    }
+
+    #[test]
+    fn out_requires_a_value() {
+        let error = parse_flags(&args(&["dbml", "local", "--out"])).expect_err("should fail");
+        assert_eq!(error.code, "INVALID_OPTION");
+    }
+
+    #[test]
+    fn dbml_appears_in_the_usage_text() {
+        assert!(usage().contains("dbx dbml <connection>"), "got: {}", usage());
     }
 }
