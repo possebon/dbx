@@ -1,5 +1,7 @@
 use crate::docs::hue_to_hex;
-use crate::docs::{Cardinality, DocEnum, DocTable, FieldRef, Relationship, SnapshotWarning, TableGroup};
+use crate::docs::{
+    Cardinality, DocEnum, DocTable, FieldRef, Relationship, SchemaSnapshot, SnapshotWarning, TableGroup,
+};
 use crate::types::{ColumnInfo, IndexInfo};
 
 /// DBML accepts bare identifiers matching `[A-Za-z_][A-Za-z0-9_]*`;
@@ -259,6 +261,59 @@ pub(crate) fn render_group(group: &TableGroup, members: &[&DocTable], qualify: b
 
     out.push_str("}\n");
     out
+}
+
+/// DBML text plus every construct that could not be represented in it.
+#[derive(Debug, Clone)]
+pub struct DbmlOutput {
+    pub text: String,
+    pub warnings: Vec<SnapshotWarning>,
+}
+
+fn render_project(snapshot: &SchemaSnapshot) -> String {
+    let mut out = format!("Project {} {{\n", quote_identifier(&snapshot.project.name));
+    out.push_str(&format!("  database_type: '{}'\n", snapshot.project.database_type.replace('\'', "\\'")));
+    if let Some(note) = snapshot.project.note.as_deref().filter(|v| !v.trim().is_empty()) {
+        out.push_str(&format!("  Note: {}\n", render_note(note)));
+    }
+    out.push_str("}\n");
+    out
+}
+
+/// Serialize a snapshot to DBML.
+///
+/// DBML is an interchange format, not a backup: check constraints, partial
+/// indexes, included columns, collations and generated columns have no
+/// representation. Each omission is reported in `warnings` so the HTML
+/// documentation — which *is* the complete record — can mark it.
+pub fn to_dbml(snapshot: &SchemaSnapshot) -> DbmlOutput {
+    let qualify = snapshot.project.schemas.len() > 1;
+    let mut warnings = Vec::new();
+    let mut sections: Vec<String> = vec![render_project(snapshot)];
+
+    for value in &snapshot.enums {
+        sections.push(render_enum(value, qualify));
+    }
+
+    for group in &snapshot.groups {
+        let members: Vec<&DocTable> =
+            snapshot.tables.iter().filter(|table| table.group_id.as_deref() == Some(group.id.as_str())).collect();
+        let rendered = render_group(group, &members, qualify);
+        if !rendered.is_empty() {
+            sections.push(rendered);
+        }
+    }
+
+    for table in &snapshot.tables {
+        sections.push(render_table(table, qualify, &mut warnings));
+    }
+
+    if !snapshot.relationships.is_empty() {
+        let refs: String = snapshot.relationships.iter().map(|rel| render_ref(rel, qualify)).collect();
+        sections.push(refs);
+    }
+
+    DbmlOutput { text: sections.join("\n"), warnings }
 }
 
 #[cfg(test)]
@@ -601,5 +656,111 @@ mod tests {
     fn an_empty_group_renders_nothing() {
         let group = TableGroup { id: "empty".to_string(), name: "Empty".to_string(), hue: 0, note: None };
         assert_eq!(render_group(&group, &[], false), "");
+    }
+
+    use crate::docs::{ProjectMeta, SchemaSnapshot};
+
+    fn snapshot(tables: Vec<DocTable>, schemas: Vec<&str>) -> SchemaSnapshot {
+        SchemaSnapshot {
+            format_version: 1,
+            project: ProjectMeta {
+                name: "Ecommerce".to_string(),
+                database_type: "PostgreSQL".to_string(),
+                database: Some("shop".to_string()),
+                schemas: schemas.into_iter().map(str::to_string).collect(),
+                generated_at: "2026-08-02T12:00:00Z".to_string(),
+                note: Some("Storefront database.".to_string()),
+            },
+            tables,
+            relationships: vec![],
+            groups: vec![],
+            enums: vec![],
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn emits_a_project_block_first() {
+        let out = to_dbml(&snapshot(vec![], vec!["public"]));
+        assert!(out.text.starts_with("Project Ecommerce {\n"), "got:\n{}", out.text);
+        assert!(out.text.contains("database_type: 'PostgreSQL'"), "got:\n{}", out.text);
+        assert!(out.text.contains("Note: '''Storefront database.'''"), "got:\n{}", out.text);
+    }
+
+    #[test]
+    fn a_single_schema_snapshot_uses_bare_table_names() {
+        let out = to_dbml(&snapshot(vec![doc_table("orders", vec![col("id", "integer")], vec![])], vec!["public"]));
+        assert!(out.text.contains("Table orders {"), "got:\n{}", out.text);
+        assert!(!out.text.contains("Table public.orders"), "got:\n{}", out.text);
+    }
+
+    #[test]
+    fn a_multi_schema_snapshot_qualifies_every_table() {
+        let mut analytics = doc_table("daily_sales", vec![col("id", "integer")], vec![]);
+        analytics.schema = Some("analytics".to_string());
+
+        let out = to_dbml(&snapshot(
+            vec![doc_table("orders", vec![col("id", "integer")], vec![]), analytics],
+            vec!["public", "analytics"],
+        ));
+
+        assert!(out.text.contains("Table public.orders {"), "got:\n{}", out.text);
+        assert!(out.text.contains("Table analytics.daily_sales {"), "got:\n{}", out.text);
+    }
+
+    #[test]
+    fn sections_appear_in_order_project_enums_groups_tables_refs() {
+        let mut snap = snapshot(vec![doc_table("orders", vec![col("id", "integer")], vec![])], vec!["public"]);
+        snap.enums.push(DocEnum {
+            schema: Some("public".to_string()),
+            name: "order_status".to_string(),
+            values: vec!["pending".to_string()],
+            note: None,
+            synthesized: false,
+        });
+        snap.groups.push(TableGroup {
+            id: "order-management".to_string(),
+            name: "Order Management".to_string(),
+            hue: 28,
+            note: None,
+        });
+        snap.tables[0].group_id = Some("order-management".to_string());
+        snap.relationships.push(relationship(Cardinality::ManyToOne));
+
+        let text = to_dbml(&snap).text;
+        let project = text.find("Project ").expect("project");
+        let enum_at = text.find("Enum ").expect("enum");
+        let group = text.find("TableGroup ").expect("group");
+        let table = text.find("Table orders").expect("table");
+        let reference = text.find("Ref ").expect("ref");
+
+        assert!(project < enum_at, "project before enums:\n{text}");
+        assert!(enum_at < group, "enums before groups:\n{text}");
+        assert!(group < table, "groups before tables:\n{text}");
+        assert!(table < reference, "tables before refs:\n{text}");
+    }
+
+    #[test]
+    fn warnings_from_table_rendering_reach_the_output() {
+        let index = IndexInfo {
+            name: "idx_partial".to_string(),
+            columns: vec!["status".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: Some("status <> 'x'".to_string()),
+            index_type: None,
+            included_columns: None,
+            comment: None,
+        };
+        let out =
+            to_dbml(&snapshot(vec![doc_table("orders", vec![col("status", "text")], vec![index])], vec!["public"]));
+        assert_eq!(out.warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_group_referencing_a_missing_table_is_skipped() {
+        let mut snap = snapshot(vec![doc_table("orders", vec![col("id", "integer")], vec![])], vec!["public"]);
+        snap.groups.push(TableGroup { id: "ghost".to_string(), name: "Ghost".to_string(), hue: 200, note: None });
+        assert!(!to_dbml(&snap).text.contains("Ghost"), "got:\n{}", to_dbml(&snap).text);
     }
 }
