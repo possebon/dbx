@@ -36,3 +36,10 @@ pub fn build_table_structure_change_sql(options: TableStructureSqlOptions) -> Ta
     statements.extend(build_table_comment_sql(&options, &mut warnings));
     TableStructureSqlResult { statements, warnings }
 }
+
+/// Whether this engine supports COMMENT ON for tables and columns. The
+/// documentation collector uses this to warn when DBX's own annotation
+/// layer is the only possible source of prose.
+pub(crate) fn supports_comments(database_type: crate::models::connection::DatabaseType) -> bool {
+    dialect::capabilities_for(Some(database_type)).comment
+}

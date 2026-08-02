@@ -288,7 +288,10 @@ fn render_project(snapshot: &SchemaSnapshot) -> String {
 /// documentation — which *is* the complete record — can mark it.
 pub fn to_dbml(snapshot: &SchemaSnapshot) -> DbmlOutput {
     let qualify = snapshot.project.schemas.len() > 1;
-    let mut warnings = Vec::new();
+    // Start from the collector's warnings so omissions discovered at collection
+    // time (skipped tables, unsupported comments) survive into the output
+    // alongside those discovered while rendering.
+    let mut warnings = snapshot.warnings.clone();
     let mut sections: Vec<String> = vec![render_project(snapshot)];
 
     for value in &snapshot.enums {
@@ -762,5 +765,22 @@ mod tests {
         let mut snap = snapshot(vec![doc_table("orders", vec![col("id", "integer")], vec![])], vec!["public"]);
         snap.groups.push(TableGroup { id: "ghost".to_string(), name: "Ghost".to_string(), hue: 200, note: None });
         assert!(!to_dbml(&snap).text.contains("Ghost"), "got:\n{}", to_dbml(&snap).text);
+    }
+
+    #[test]
+    fn collector_warnings_survive_into_the_output() {
+        let mut snap = snapshot(vec![], vec!["public"]);
+        snap.warnings.push(SnapshotWarning::TableSkipped {
+            table: "public.secret".to_string(),
+            reason: "permission denied".to_string(),
+        });
+
+        let out = to_dbml(&snap);
+
+        assert_eq!(out.warnings.len(), 1, "collector warnings must not be dropped");
+        match &out.warnings[0] {
+            SnapshotWarning::TableSkipped { table, .. } => assert_eq!(table, "public.secret"),
+            other => panic!("unexpected warning: {other:?}"),
+        }
     }
 }
