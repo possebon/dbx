@@ -37,6 +37,7 @@ describe("categorizePlanNode", () => {
   it("resolves the operators whose names overlap across categories", () => {
     expect(categorizePlanNode("Merge Join")).toBe("join");
     expect(categorizePlanNode("Merge")).toBe("mod");
+    expect(categorizePlanNode("Merge Append")).toBe("other");
     expect(categorizePlanNode("Gather Merge")).toBe("xchg");
     expect(categorizePlanNode("Clustered Index Scan")).toBe("tscan");
     expect(categorizePlanNode("Index Scan")).toBe("iscan");

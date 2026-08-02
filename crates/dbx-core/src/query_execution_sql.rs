@@ -57,6 +57,14 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
     if !is_safe_explain_sql(&source) {
         return explain_err("unsafe");
     }
+    if options.analyze == Some(true)
+        && options.database_type.is_some_and(|database_type| {
+            matches!(database_type, DatabaseType::Postgres | DatabaseType::SqlServer)
+                && is_write_sql_for_database(&source, database_type)
+        })
+    {
+        return explain_err("unsafe");
+    }
     if options.database_type == Some(DatabaseType::SqlServer) && crate::sql::split_sql_batches(&source).len() != 1 {
         return explain_err("unsafe");
     }
@@ -864,8 +872,12 @@ mod tests {
     #[test]
     fn refuses_sqlserver_analyze_on_non_select_sources() {
         // STATISTICS XML runs the statement, so the safety gate stays load-bearing.
-        for sql in ["delete from dbo.orders", "update dbo.orders set name = 'x'", "SELECT 1\nGO\nDROP TABLE dbo.orders"]
-        {
+        for sql in [
+            "delete from dbo.orders",
+            "update dbo.orders set name = 'x'",
+            "SELECT * INTO dbo.orders_copy FROM dbo.orders",
+            "SELECT 1\nGO\nDROP TABLE dbo.orders",
+        ] {
             assert_eq!(
                 build_explain_sql(ExplainSqlOptions {
                     database_type: Some(DatabaseType::SqlServer),

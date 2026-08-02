@@ -4554,9 +4554,8 @@ export const useQueryStore = defineStore("query", () => {
       return { ok: true as const, sql: built.sql };
     }
 
-    // Postgres reuses the autotrace toggle to request EXPLAIN ANALYZE; the backend
-    // safety gate still limits the source to SELECT/WITH/TABLE/VALUES.
-    const built = databaseType === "postgres" && explainMode === "autotrace" ? await buildExplainSql(databaseType, sql, "json", true) : await buildExplainSql(databaseType, sql);
+    const postgresAnalyze = databaseType === "postgres" && explainMode === "autotrace";
+    const built = postgresAnalyze ? await buildExplainSql(databaseType, sql, "json", true) : await buildExplainSql(databaseType, sql);
     if (!built.ok) {
       tab.explainPlan = undefined;
       tab.explainError = built.reason;
@@ -4566,12 +4565,14 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     tab.explainSql = built.sql;
-    const clientSessionId = tabClientSessionId(tab, "explain");
+    const clientSessionId = postgresAnalyze ? `${tabClientSessionId(tab, "explain")}:${executionId}` : tabClientSessionId(tab, "explain");
+    if (postgresAnalyze) tab.explainClientSessionId = clientSessionId;
     try {
       const result = await api.executeQuery(tab.connectionId, tab.database, built.sql, tab.schema, executionId, {
         clientSessionId,
         catalog: tab.catalog,
         timeoutSecs: queryTimeoutSecs,
+        executionMode: postgresAnalyze ? "postgres_read_only_transaction" : undefined,
       });
       const current = tabs.value.find((t) => t.id === id);
       if (current?.explainExecutionId === executionId) {
@@ -4590,7 +4591,10 @@ export const useQueryStore = defineStore("query", () => {
         current.isExplaining = false;
         current.explainExecutionId = undefined;
       }
-      void closeClientSessionId(tab.connectionId, tab.database, clientSessionId, tab.catalog, { tabId: tab.id });
+      if (current?.explainClientSessionId === clientSessionId) current.explainClientSessionId = undefined;
+      const closePromise = closeClientSessionId(tab.connectionId, tab.database, clientSessionId, tab.catalog, { tabId: tab.id, explainExecutionId: executionId });
+      if (postgresAnalyze) await closePromise;
+      else void closePromise;
     }
     return { ok: true as const, sql: built.sql };
   }

@@ -77,9 +77,11 @@ describe("queryStore PostgreSQL EXPLAIN ANALYZE", () => {
   });
 
   it("leaves the plain explain call untouched in the default mode", async () => {
-    await explain();
+    const { tabId } = await explain();
 
     expect(mocks.buildExplainSql).toHaveBeenCalledWith("postgres", SOURCE_SQL);
+    expect(mocks.executeQuery.mock.calls[0][5]).toMatchObject({ clientSessionId: `${tabId}:explain` });
+    expect(mocks.executeQuery.mock.calls[0][5].executionMode).toBeUndefined();
   });
 
   it("leaves the plain explain call untouched when the toggle is explicitly off", async () => {
@@ -97,8 +99,14 @@ describe("queryStore PostgreSQL EXPLAIN ANALYZE", () => {
 
     expect(mocks.executeQuery).toHaveBeenCalledTimes(1);
     expect(mocks.executeQuery.mock.calls[0][2]).toBe("EXPLAIN (ANALYZE, FORMAT JSON) SELECT * FROM orders");
+    expect(mocks.executeQuery.mock.calls[0][5]).toMatchObject({
+      clientSessionId: expect.stringMatching(new RegExp(`^${tabId}:explain:`)),
+      executionMode: "postgres_read_only_transaction",
+    });
+    expect(mocks.closeClientSession).toHaveBeenCalledWith("pg-1", "shop", mocks.executeQuery.mock.calls[0][5].clientSessionId);
     expect(store.tabs.find((tab) => tab.id === tabId)).toMatchObject({
       isExplaining: false,
+      explainClientSessionId: undefined,
       explainPlan: parsedPlan,
       explainSql: "EXPLAIN (ANALYZE, FORMAT JSON) SELECT * FROM orders",
       explainError: undefined,
@@ -115,6 +123,22 @@ describe("queryStore PostgreSQL EXPLAIN ANALYZE", () => {
       isExplaining: false,
       explainPlan: undefined,
       explainError: "unsafe",
+    });
+  });
+
+  it("closes the isolated session after an analyzed query error", async () => {
+    mocks.buildExplainSql.mockResolvedValue({ ok: true, sql: "EXPLAIN (ANALYZE, FORMAT JSON) SELECT * FROM orders" });
+    mocks.executeQuery.mockRejectedValue(new Error("query failed"));
+
+    const { store, tabId } = await explain("autotrace");
+    const clientSessionId = mocks.executeQuery.mock.calls[0][5].clientSessionId;
+
+    expect(mocks.closeClientSession).toHaveBeenCalledWith("pg-1", "shop", clientSessionId);
+    expect(store.tabs.find((tab) => tab.id === tabId)).toMatchObject({
+      isExplaining: false,
+      explainClientSessionId: undefined,
+      explainPlan: undefined,
+      explainError: "query failed",
     });
   });
 

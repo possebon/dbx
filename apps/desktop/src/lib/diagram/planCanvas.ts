@@ -24,7 +24,7 @@ const CATEGORY_RULES: Array<[RegExp, PlanCanvasCategory]> = [
   [/aggregate|group by|grouping_operation|hagr\d*|sagr\d*|\bagg\b/, "agg"],
   [/sort|ordering_operation/, "sort"],
   [/gather|parallelism|px send|px receive|px block|exchange|repartition|distribute/, "xchg"],
-  [/^(?:insert|update|delete|merge|replace)\b|modifytable|table (?:insert|update|delete|merge)|clustered index (?:insert|update|delete|merge)|load table|\bdml\b/, "mod"],
+  [/^(?:insert|update|delete|replace)\b|^merge$|modifytable|table (?:insert|update|delete|merge)|clustered index (?:insert|update|delete|merge)|load table|\bdml\b/, "mod"],
   [/materiali[sz]|spool|\bhash\b|\bcte\b|temp table transformation|worktable/, "mat"],
   [/clustered index scan|seq scan|sequential scan|table scan|table access full|table access storage full|cscn\d*/, "tscan"],
   [/index.*(?:scan|seek)|bitmap heap scan|ssek\d*|csek\d*|bmsk\d*/, "iscan"],
