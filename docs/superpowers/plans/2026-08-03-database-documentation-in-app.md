@@ -1642,7 +1642,34 @@ On an `edit` event from `DocsApp`: apply the matching `annotationEdits` function
 
 - [ ] **Step 6: Wire the trigger**
 
-Add `docsSource` to `connectionStore` mirroring `diagramSource`. Add a watcher in `useDialogSources.ts` beside the diagram one (~line 162) setting `showDocsDialog` and the prefills. Register in `AppDialogs.vue` with `defineAsyncComponent` and `v-if` + `v-model:open`, matching `SchemaDiagramDialog`'s shape. Add the menu entry that sets `docsSource`.
+The schema diagram uses this exact five-point wiring. Mirror it — I verified every location:
+
+1. **`apps/desktop/src/stores/connectionStore.ts:381`** — `diagramSource` is
+   `ref<{ connectionId: string; database: string; schema?: string; tableName?: string } | null>(null)`,
+   returned from the store at line 6928. Add `docsSource` with the same shape beside it, and export it
+   the same way.
+
+2. **`apps/desktop/src/composables/useDialogSources.ts` (~line 162)** — a `watch` on
+   `connectionStore.diagramSource` copies the prefills, sets `showDiagramDialog.value = true`, then
+   clears the source back to `null`. **Clearing it is what makes the dialog re-openable** — without
+   that, setting the same value twice does not re-trigger the watcher. Add the docs equivalent.
+
+3. **`apps/desktop/src/components/layout/AppDialogs.vue:13`** — `defineAsyncComponent(() => import(...))`,
+   and **line 198** — rendered with `v-if="dialogs.showDiagramDialog.value"`,
+   `v-model:open`, and the prefill props. Follow both.
+
+4. **`apps/desktop/src/components/objects/ObjectBrowser.vue:1428`** — `openDiagram(row)` sets
+   `connectionStore.diagramSource = { connectionId: props.connection.id, database: props.database,
+   schema: row.schema || selectedSchema.value, tableName: ... }`. Add `openDocs(row)` the same way.
+
+5. **`apps/desktop/src/components/objects/ObjectBrowser.vue:2605`** — the context-menu entry, shaped
+   `...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(row) }] : [])`.
+   Add the docs entry beside it using `t("docs.title")` from the namespace Task 6 added.
+
+**ObjectBrowser is the right entry point**, not the connection tree: the tree has no `diagram.open`
+entry either, and the docs dialog takes exactly the prefills ObjectBrowser already supplies
+(connection, database, schema). If a tree-level entry is wanted later it is one more call site
+setting the same `docsSource`.
 
 - [ ] **Step 7: Verify two guards bite**
 
