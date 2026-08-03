@@ -326,7 +326,7 @@ async fn connection_of(state: &Arc<AppState>, connection_id: &str) -> Result<Con
 /// depend on dbx-mcp.)
 async fn notes_path_of(state: &Arc<AppState>, connection_id: &str) -> Result<std::path::PathBuf, String> {
     let config = connection_of(state, connection_id).await?;
-    Ok(resolve_notes_path(&config, state.storage.data_dir()))
+    Ok(resolve_notes_path(&config.id, config.docs_notes_path.as_deref(), state.storage.data_dir()))
 }
 
 /// Collect a RAW snapshot — annotations are applied separately, so the
@@ -458,7 +458,7 @@ pub struct DocsSaveRequest {
 /// this needs no lookup and no new dependency — dbx-web does NOT depend on
 /// dbx-mcp.
 fn notes_path_for(state: &Arc<WebState>, config: &ConnectionConfig) -> std::path::PathBuf {
-    dbx_core::docs::annotations::resolve_notes_path(config, &state.data_dir)
+    dbx_core::docs::annotations::resolve_notes_path(&config.id, config.docs_notes_path.as_deref(), &state.data_dir)
 }
 
 pub async fn load_annotations(
