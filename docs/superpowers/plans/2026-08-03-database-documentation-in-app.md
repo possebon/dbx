@@ -1202,7 +1202,8 @@ git commit -m "feat(docs): add note editor, group editor and group picker"
 
 **Files:**
 - Create: `apps/desktop/src/docs/components/EnumPage.vue`
-- Modify: `apps/desktop/src/docs/docsIndex.ts`, `apps/desktop/src/docs/__tests__/docsIndex.spec.ts`, `componentContract.spec.ts` (`EXPECTED`)
+- Create: `apps/desktop/src/docs/docsKeys.ts`
+- Modify: `apps/desktop/src/docs/docsIndex.ts`, `docsSearch.ts`, `DocsApp.vue`, `components/DocsSidebar.vue`, `components/WikiIndex.vue` (and any other component holding a `tableKey` copy), `apps/desktop/src/docs/__tests__/docsIndex.spec.ts`, `componentContract.spec.ts` (`EXPECTED`)
 
 **Interfaces:**
 - Produces: `columnsUsingEnum(snapshot: SchemaSnapshot, enumName: string): Array<{ tableKey: string; table: string; column: string }>`
@@ -1299,12 +1300,7 @@ export function columnsUsingEnum(
   for (const table of snapshot.tables) {
     for (const column of table.columns) {
       if (column.data_type === enumName) {
-        // `docsIndex.ts` builds this key inline inside groupBySchema and
-        // groupByTableGroup; there is no exported helper. Extract one and use
-        // it in all three places rather than writing a fourth copy — the
-        // qualified-key rule (schema.name, or bare name when schema is null)
-        // is already duplicated across this file and docsSearch.ts.
-        hits.push({ tableKey: qualifiedKey(table), table: table.name, column: column.name });
+        hits.push({ tableKey: qualifiedTableKey(table), table: table.name, column: column.name });
       }
     }
   }
@@ -1312,7 +1308,38 @@ export function columnsUsingEnum(
 }
 ```
 
-`docsIndex.ts` has NO exported key helper — `groupBySchema` and `groupByTableGroup` each build the key inline. Extract `qualifiedKey(table: DocTable): string` (returning `schema.name`, or the bare name when `schema` is null), use it in all three call sites, and report the refactor. Do not add a fourth inline copy.
+**The qualified table key is currently duplicated at least four times**, and this task would add a
+fifth. Extract it first, into a new `apps/desktop/src/docs/docsKeys.ts`:
+
+```ts
+import type { DocTable } from "./types";
+
+/**
+ * The key that identifies a table across the viewer — `schema.name`, or the
+ * bare name on schema-less engines like SQLite and MySQL.
+ *
+ * This rule was copied into four places before it lived here. It is the key
+ * that annotations are stored under, so two call sites disagreeing would
+ * attach a note to the wrong table.
+ */
+export function qualifiedTableKey(table: DocTable): string {
+  return table.schema ? `${table.schema}.${table.name}` : table.name;
+}
+```
+
+Then replace every existing copy with an import of it:
+- `docsSearch.ts:12` — the private `qualified(schema, name)`. It is called with loose arguments in
+  places, so either adapt those call sites or keep a thin local wrapper that delegates; say which
+  you did.
+- `DocsApp.vue:22`, `components/DocsSidebar.vue:19`, `components/WikiIndex.vue:15` — each has its
+  own `tableKey(table)`. Check the remaining components for further copies and replace those too;
+  report how many you found in total.
+
+Note `docsIndex.ts` does NOT contain a copy — it groups by `table.schema ?? ""`, which is a
+*section* key, not a table key. Do not change that.
+
+This extraction is in scope deliberately: Part 3a's final review flagged the duplication as a
+Minor and it was deferred, and this task is the moment a new consumer appears.
 
 - [ ] **Step 4: Run and watch it pass, then build `EnumPage.vue`**
 
