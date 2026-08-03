@@ -24,7 +24,8 @@ function safeUrl(raw: unknown): string | null {
   // Protocol-relative. Harmless over https, but the Part 3b standalone export
   // is opened via file://, where //host/path is a UNC path — on Windows that
   // opens an SMB connection and leaks an NTLM hash, and images need no click.
-  if (url.startsWith("//")) {
+  // Both separators must be rejected: the URL spec treats /\ exactly like //.
+  if (/^[/\\]{2}/.test(url)) {
     return null;
   }
   if (url.startsWith("#") || url.startsWith("/") || url.startsWith("./") || url.startsWith("../")) {

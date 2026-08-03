@@ -64,7 +64,8 @@ describe("renderNote", () => {
     expect(html).not.toContain("<img");
   });
 
-  it.each(["//evil.example.com", "//evil.example.com/a.png"])("drops the protocol-relative URL %s", (href) => {
+  it.each(["//evil.example.com", "//evil.example.com/a.png", "/\\evil.example.com", "/\\evil.example.com/a.png", "\\\\evil.example.com"])("drops the protocol-relative URL %s", (href) => {
+    // The URL spec treats /\ like //, so both separators must be rejected.
     expect(renderNote(`[x](${href})`)).not.toContain("evil.example.com");
     expect(renderNote(`![x](${href})`)).not.toContain("evil.example.com");
   });
