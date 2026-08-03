@@ -44,7 +44,11 @@ describe("docs viewer component contract", () => {
   it("makes no backend calls", () => {
     const files = vueFiles();
     expect(files.length).toBe(EXPECTED.length);
-    const forbidden = ["@/lib/backend", "@tauri-apps", "invoke(", "useConnectionStore", "useQueryStore", "useSettingsStore", "fetch(", "axios"];
+    // vue-i18n belongs here for the same reason as the backend imports: these
+    // components are bundled into a standalone HTML file with no Vue app
+    // around them, and useI18n() throws without a provided instance. Strings
+    // arrive as a `translate` prop from the host instead.
+    const forbidden = ["@/lib/backend", "@tauri-apps", "invoke(", "useConnectionStore", "useQueryStore", "useSettingsStore", "fetch(", "axios", "vue-i18n", "useI18n("];
     for (const file of files) {
       const script = scriptOf(file);
       for (const needle of forbidden) {

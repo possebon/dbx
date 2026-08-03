@@ -6,12 +6,14 @@ import TablePage from "./components/TablePage.vue";
 import WarningBanner from "./components/WarningBanner.vue";
 import WikiIndex from "./components/WikiIndex.vue";
 import "./docs.css";
+import type { Translate } from "./docsWarnings";
 import { groupBySchema, groupByTableGroup } from "./docsIndex";
 import { renderNote } from "./renderNote";
 import type { DocTable, SchemaSnapshot } from "./types";
 
 const props = defineProps<{
   snapshot: SchemaSnapshot;
+  translate: Translate;
 }>();
 
 // Grouping is computed once here and handed to both the sidebar and the index,
@@ -62,7 +64,7 @@ function open(key: string): void {
         <DocsSearch :snapshot="snapshot" @select="open" />
       </header>
 
-      <WarningBanner :warnings="snapshot.warnings" />
+      <WarningBanner :warnings="snapshot.warnings" :translate="translate" />
 
       <div v-if="view === 'index'" class="flex flex-col gap-4">
         <div v-if="snapshot.project.note" class="text-sm text-muted-foreground" v-html="renderNote(snapshot.project.note)"></div>
