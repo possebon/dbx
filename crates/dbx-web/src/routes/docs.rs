@@ -55,3 +55,60 @@ pub async fn collect_snapshot(
 
     Ok(Json(snapshot))
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocsAnnotationsRequest {
+    pub connection_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocsApplyRequest {
+    pub connection_id: String,
+    pub snapshot: SchemaSnapshot,
+    pub annotations: dbx_core::docs::annotations::AnnotationFile,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocsSaveRequest {
+    pub connection_id: String,
+    pub annotations: dbx_core::docs::annotations::AnnotationFile,
+}
+
+/// `WebState` already carries the data directory (`pub data_dir: PathBuf`), so
+/// this needs no lookup and no new dependency — dbx-web does NOT depend on
+/// dbx-mcp.
+fn notes_path_for(state: &Arc<WebState>, config: &ConnectionConfig) -> std::path::PathBuf {
+    dbx_core::docs::annotations::resolve_notes_path(&config.id, config.docs_notes_path.as_deref(), &state.data_dir)
+}
+
+pub async fn load_annotations(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<DocsAnnotationsRequest>,
+) -> Result<Json<Option<dbx_core::docs::annotations::AnnotationFile>>, AppError> {
+    let config = load_connection(&state, &request.connection_id).await?;
+    let path = notes_path_for(&state, &config);
+    Ok(Json(dbx_core::docs::annotations::load_annotations(&path).map_err(AppError::from)?))
+}
+
+pub async fn apply_annotations(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<DocsApplyRequest>,
+) -> Result<Json<SchemaSnapshot>, AppError> {
+    let config = load_connection(&state, &request.connection_id).await?;
+    let mut applied = request.snapshot;
+    dbx_core::docs::annotations::apply_annotations(&mut applied, &request.annotations, config.db_type);
+    Ok(Json(applied))
+}
+
+pub async fn save_annotations(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<DocsSaveRequest>,
+) -> Result<Json<()>, AppError> {
+    let config = load_connection(&state, &request.connection_id).await?;
+    let path = notes_path_for(&state, &config);
+    dbx_core::docs::annotations::save_annotations(&path, &request.annotations).map_err(AppError::from)?;
+    Ok(Json(()))
+}
