@@ -656,7 +656,40 @@ export async function saveDocsAnnotations(connectionId: string, annotations: Ann
 }
 ```
 
-In `http.ts`, the same four signatures against `/api/docs/snapshot`, `/api/docs/annotations/load`, `/api/docs/annotations/apply`, `/api/docs/annotations/save`, following that file's existing request helper. Read a neighbouring function in each file first and match its idiom exactly rather than inventing one.
+In `http.ts`, the same four signatures using that file's `post<T>(url, body)` helper (defined at
+`http.ts:222`, which throws `backendResponseError` on a non-OK status and returns `res.json()`):
+
+```ts
+export async function collectDocsSnapshot(
+  connectionId: string,
+  database: string,
+  schemas: string[],
+  tables: string[],
+  projectName?: string,
+): Promise<SchemaSnapshot> {
+  return post("/api/docs/snapshot", { connectionId, database, schemas, tables, projectName });
+}
+
+export async function loadDocsAnnotations(connectionId: string): Promise<AnnotationFile | null> {
+  return post("/api/docs/annotations/load", { connectionId });
+}
+
+export async function applyDocsAnnotations(
+  connectionId: string,
+  snapshot: SchemaSnapshot,
+  annotations: AnnotationFile,
+): Promise<SchemaSnapshot> {
+  return post("/api/docs/annotations/apply", { connectionId, snapshot, annotations });
+}
+
+export async function saveDocsAnnotations(connectionId: string, annotations: AnnotationFile): Promise<void> {
+  return post("/api/docs/annotations/save", { connectionId, annotations });
+}
+```
+
+**The two transports must expose identical signatures.** `api.ts` types the backend as `typeof TauriModule` and `forward()` re-exports by name, so a signature that differs between `tauri.ts` and `http.ts` is a type error at the facade — which is the only place it would ever be caught.
+
+**Tauri serialises command arguments BY NAME.** The Rust commands take `connection_id`, `database`, `schemas`, `tables`, `project_name`, `snapshot`, `annotations`; Tauri converts camelCase to snake_case automatically, so the `invoke` object keys above must be exactly `connectionId`, `database`, `schemas`, `tables`, `projectName`, `snapshot`, `annotations`. A mismatch compiles cleanly on both sides and fails only at runtime when a user clicks.
 
 In `api.ts`, beside the other forwards:
 
