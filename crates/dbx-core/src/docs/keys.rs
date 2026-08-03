@@ -8,9 +8,18 @@ use crate::models::connection::DatabaseType;
 /// collection — on the rare case-sensitive configuration the only risk is
 /// matching a note to a table differing solely by case, never attaching a
 /// note to an unrelated table.
+///
+/// ClickHouse and MongoDB are genuinely case-sensitive: two identifiers
+/// differing only by case are DIFFERENT objects there, so folding them
+/// would let one note attach to the wrong one. They are left untouched.
+///
+/// The lower-case default is correct for the remaining SQL engines
+/// (SQLite, SQL Server, DuckDB, rqlite, Doris, StarRocks), all of which
+/// compare identifiers case-insensitively.
 pub fn fold_identifier(db_type: DatabaseType, value: &str) -> String {
     match db_type {
         DatabaseType::Oracle => value.to_uppercase(),
+        DatabaseType::ClickHouse | DatabaseType::MongoDb => value.to_string(),
         _ => value.to_lowercase(),
     }
 }
@@ -60,9 +69,30 @@ mod tests {
 
     #[test]
     fn folding_is_idempotent() {
-        let once = table_key(DatabaseType::Postgres, Some("Core"), "Orders");
-        let twice = table_key(DatabaseType::Postgres, Some(&once), "x");
-        assert!(twice.starts_with("core.orders"), "got {twice}");
-        assert_eq!(fold_identifier(DatabaseType::Postgres, &once), once);
+        // Folding an already-folded value must be a no-op, or a key would
+        // depend on how many times it had been normalised.
+        for engine in [DatabaseType::Postgres, DatabaseType::Oracle, DatabaseType::ClickHouse] {
+            let once = fold_identifier(engine, "MixedCase");
+            assert_eq!(fold_identifier(engine, &once), once, "engine {engine:?}");
+        }
+
+        let key_once = table_key(DatabaseType::Postgres, Some("Core"), "Orders");
+        assert_eq!(key_once, "core.orders");
+        // Re-folding each segment of an existing key must not change it.
+        let refolded = key_once
+            .split('.')
+            .map(|segment| fold_identifier(DatabaseType::Postgres, segment))
+            .collect::<Vec<_>>()
+            .join(".");
+        assert_eq!(refolded, key_once);
+    }
+
+    #[test]
+    fn case_sensitive_engines_are_not_folded() {
+        // ClickHouse and MongoDB treat `Orders` and `orders` as DIFFERENT
+        // objects. Folding them would let one note attach to the wrong one.
+        assert_eq!(fold_identifier(DatabaseType::ClickHouse, "Orders"), "Orders");
+        assert_eq!(fold_identifier(DatabaseType::MongoDb, "Orders"), "Orders");
+        assert_eq!(table_key(DatabaseType::ClickHouse, Some("Analytics"), "Orders"), "Analytics.Orders");
     }
 }
