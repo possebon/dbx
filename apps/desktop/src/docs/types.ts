@@ -14,11 +14,18 @@ export interface ColumnInfo {
   column_default: string | null;
   is_primary_key: boolean;
   extra: string | null;
-  comment?: string | null;
-  numeric_precision?: number | null;
-  numeric_scale?: number | null;
-  character_maximum_length?: number | null;
-  enum_values?: string[] | null;
+  // No skip_serializing_if in Rust — these keys are ALWAYS present, so they
+  // are required and may be null. Marking them optional would let `undefined`
+  // reach code that checks `=== null`.
+  comment: string | null;
+  numeric_precision: number | null;
+  numeric_scale: number | null;
+  character_maximum_length: number | null;
+  // These three DO carry skip_serializing_if, so the key is absent rather
+  // than null when there is no value.
+  enum_values?: string[];
+  character_set?: string;
+  collation?: string;
 }
 
 export interface IndexInfo {
@@ -26,10 +33,11 @@ export interface IndexInfo {
   columns: string[];
   is_unique: boolean;
   is_primary: boolean;
-  filter?: string | null;
-  index_type?: string | null;
-  included_columns?: string[] | null;
-  comment?: string | null;
+  // No skip_serializing_if on any of these in Rust — required, may be null.
+  filter: string | null;
+  index_type: string | null;
+  included_columns: string[] | null;
+  comment: string | null;
 }
 
 export interface ForeignKeyInfo {

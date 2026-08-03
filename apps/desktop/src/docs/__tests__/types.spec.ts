@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { SchemaSnapshot, SnapshotWarning } from "../types";
+import type { ColumnInfo, IndexInfo, SchemaSnapshot, SnapshotWarning } from "../types";
 
 describe("snapshot types", () => {
   it("accepts a minimal snapshot shaped like the Rust output", () => {
@@ -56,5 +56,40 @@ describe("snapshot types", () => {
     } else {
       throw new Error("discriminated union must narrow on kind");
     }
+  });
+
+  it("requires the always-serialized column and index fields", () => {
+    // These keys have no skip_serializing_if in Rust, so they are always
+    // present in the JSON. Typing them optional would let `undefined` reach
+    // code that checks `=== null`.
+    const column: ColumnInfo = {
+      name: "status",
+      data_type: "text",
+      is_nullable: false,
+      column_default: null,
+      is_primary_key: false,
+      extra: null,
+      comment: null,
+      numeric_precision: null,
+      numeric_scale: null,
+      character_maximum_length: null,
+    };
+    expect(column.comment).toBeNull();
+
+    const index: IndexInfo = {
+      name: "idx",
+      columns: ["status"],
+      is_unique: false,
+      is_primary: false,
+      filter: null,
+      index_type: null,
+      included_columns: null,
+      comment: null,
+    };
+    expect(index.filter).toBeNull();
+
+    // The skip_serializing_if fields may simply be absent.
+    const minimal: ColumnInfo = { ...column, enum_values: undefined };
+    expect(minimal.character_set).toBeUndefined();
   });
 });
