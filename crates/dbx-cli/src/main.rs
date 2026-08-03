@@ -93,6 +93,7 @@ struct Flags {
     timeout_ms: Option<u64>,
     file: Option<PathBuf>,
     out: Option<PathBuf>,
+    notes: Option<PathBuf>,
     allow_writes: bool,
     allow_dangerous: bool,
     help: bool,
@@ -453,7 +454,15 @@ async fn run_dbml(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, Cli
         project_name: Some(connection.name.clone()),
     };
 
-    let snapshot = backend.collect_docs_snapshot(&connection, &database, options).await.map_err(command_error)?;
+    let mut snapshot = backend.collect_docs_snapshot(&connection, &database, options).await.map_err(command_error)?;
+
+    if let Some(path) = flags.notes.as_ref() {
+        if let Some(annotations) = dbx_core::docs::annotations::load_annotations(path)
+            .map_err(|error| CliError::new("NOTES_INVALID", error))?
+        {
+            dbx_core::docs::annotations::apply_annotations(&mut snapshot, &annotations, connection.db_type);
+        }
+    }
 
     let output = dbx_core::docs::to_dbml(&snapshot);
 
@@ -498,6 +507,7 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
         timeout_ms: None,
         file: None,
         out: None,
+        notes: None,
         allow_writes: false,
         allow_dangerous: false,
         help: false,
@@ -543,6 +553,7 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
             }
             "--file" => flags.file = Some(PathBuf::from(option_value(argv, &mut index, "--file")?)),
             "--out" => flags.out = Some(PathBuf::from(option_value(argv, &mut index, "--out")?)),
+            "--notes" => flags.notes = Some(PathBuf::from(option_value(argv, &mut index, "--notes")?)),
             "--allow-writes" => flags.allow_writes = true,
             "--allow-dangerous-sql" => flags.allow_dangerous = true,
             value if value.starts_with('-') => {
@@ -871,7 +882,7 @@ fn csv_cell(value: &str) -> String {
 }
 
 fn usage() -> &'static str {
-    "Usage:\n  dbx doctor [--json]\n  dbx capabilities [--json]\n  dbx connections list [--json]\n  dbx schema list <connection> [--schema name] [--json]\n  dbx schema describe <connection> <table> [--schema name] [--json]\n  dbx query <connection> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--json]\n  dbx context <connection> [--schema name] [--tables a,b] [--max-tables n] [--json]\n  dbx dbml <connection> [--out path] [--schema name] [--database name] [--tables a,b]\n  dbx open <connection> <table> [--schema name] [--database name] [--json]"
+    "Usage:\n  dbx doctor [--json]\n  dbx capabilities [--json]\n  dbx connections list [--json]\n  dbx schema list <connection> [--schema name] [--json]\n  dbx schema describe <connection> <table> [--schema name] [--json]\n  dbx query <connection> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--json]\n  dbx context <connection> [--schema name] [--tables a,b] [--max-tables n] [--json]\n  dbx dbml <connection> [--out path] [--notes path] [--schema name] [--database name] [--tables a,b]\n  dbx open <connection> <table> [--schema name] [--database name] [--json]"
 }
 
 #[cfg(test)]
@@ -1107,6 +1118,24 @@ mod tests {
     fn out_requires_a_value() {
         let error = parse_flags(&args(&["dbml", "local", "--out"])).expect_err("should fail");
         assert_eq!(error.code, "INVALID_OPTION");
+    }
+
+    #[test]
+    fn parses_the_notes_flag() {
+        let flags = parse_flags(&args(&["dbml", "local", "--notes", "docs/dbx-docs.json"])).expect("parse");
+        assert_eq!(flags.args, args(&["dbml", "local"]));
+        assert_eq!(flags.notes.as_deref(), Some(std::path::Path::new("docs/dbx-docs.json")));
+    }
+
+    #[test]
+    fn notes_requires_a_value() {
+        let error = parse_flags(&args(&["dbml", "local", "--notes"])).expect_err("should fail");
+        assert_eq!(error.code, "INVALID_OPTION");
+    }
+
+    #[test]
+    fn notes_appears_in_the_usage_text() {
+        assert!(usage().contains("--notes"), "got: {}", usage());
     }
 
     #[test]
