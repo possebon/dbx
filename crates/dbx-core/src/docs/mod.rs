@@ -1,3 +1,4 @@
+pub mod annotations;
 pub mod collector;
 pub mod color;
 pub mod dbml;
