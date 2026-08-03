@@ -95,12 +95,26 @@ describe("docs viewer component contract", () => {
     // progressive enhancement: a legacy-safe base value first, then the same
     // token redefined inside `@supports (color: oklch(1 0 0))`. Without the
     // base, every table group renders colourless on those WebViews.
+    //
+    // Assert each selector's base block separately. An ordering check like
+    // `indexOf(hsl) < indexOf(@supports)` quantifies over ANY occurrence, so
+    // deleting the light block leaves the dark block's hsl satisfying it — the
+    // test passes while light-theme legacy WebViews render every group
+    // colourless.
     const css = readFileSync(path.join(docsRoot, "docs.css"), "utf8");
-    const base = css.indexOf("--group-c: hsl(");
     const enhanced = css.indexOf("@supports (color: oklch(1 0 0))");
-    expect(base).toBeGreaterThan(-1);
     expect(enhanced).toBeGreaterThan(-1);
-    expect(base).toBeLessThan(enhanced);
-    expect(css).toContain("--group-tint");
+    const legacyBase = css.slice(0, enhanced);
+
+    for (const selector of [".docs-group", ".dark .docs-group"]) {
+      // `^` with the m flag anchors to a line start, so `.docs-group` cannot
+      // match inside `.dark .docs-group`, and neither matches the indented
+      // copies inside the @supports block.
+      const pattern = new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{([^}]*)\\}`, "m");
+      const block = pattern.exec(legacyBase)?.[1];
+      expect(block, `${selector} needs a legacy-safe base block before @supports`).toBeTruthy();
+      expect(block, `${selector} must define --group-c without oklch`).toContain("--group-c: hsl(");
+      expect(block, `${selector} must define --group-tint without oklch`).toContain("--group-tint: hsl(");
+    }
   });
 });
