@@ -66,26 +66,83 @@ describe("fixture conformance", () => {
     }
   });
 
-  it("column objects carry every field types.ts declares as required", () => {
-    // types.ts marks these required because Rust has no skip_serializing_if.
-    // If Rust ever adds one, the key vanishes and this fails — which is the
-    // whole point of validating against real output rather than a literal.
-    const snapshot = loadFixture();
-    const table = snapshot.tables.find((candidate) => candidate.columns.length > 0);
-    expect(table, "fixture needs a table with columns").toBeDefined();
-    const column = table!.columns[0] as unknown as Record<string, unknown>;
-    for (const key of ["name", "data_type", "is_nullable", "column_default", "is_primary_key", "extra", "comment", "numeric_precision", "numeric_scale", "character_maximum_length"]) {
-      expect(Object.hasOwn(column, key), `column must always carry ${key}`).toBe(true);
+  // Every struct below is pinned in BOTH directions — no missing key, no
+  // unexpected key — because each direction catches a different drift. A
+  // missing key is a removal or a rename's old name; an unexpected key is the
+  // rename's new name. Pinning only "required keys present" lets a rename of
+  // Relationship::to slip through the whole suite AND vue-tsc while
+  // RelationshipList reads `field.table` on undefined and every table page
+  // renders blank.
+  //
+  // `Object.hasOwn`, never truthiness: most of these keys are legitimately
+  // null, and "present and null" must stay distinguishable from "absent",
+  // which is what skip_serializing_if produces.
+  function pinShape(label: string, instances: unknown[], required: string[], optional: string[] = []): void {
+    // An empty instance list runs zero assertions and passes while proving
+    // nothing, so every struct has to actually appear in the fixture.
+    expect(instances.length, `fixture must contain at least one ${label}`).toBeGreaterThan(0);
+    const allowed = new Set([...required, ...optional]);
+    for (const [position, instance] of instances.entries()) {
+      const record = instance as Record<string, unknown>;
+      for (const key of required) {
+        expect(Object.hasOwn(record, key), `${label}[${position}] must always carry ${key}`).toBe(true);
+      }
+      for (const key of Object.keys(record)) {
+        expect(allowed.has(key), `${label}[${position}] carries unexpected key ${key}`).toBe(true);
+      }
     }
+  }
+
+  it("the snapshot root has exactly the keys types.ts declares", () => {
+    pinShape("SchemaSnapshot", [loadFixture()], ["formatVersion", "project", "tables", "relationships", "groups", "enums", "warnings"]);
   });
 
-  it("index objects carry every field types.ts declares as required", () => {
-    const snapshot = loadFixture();
-    const table = snapshot.tables.find((candidate) => candidate.indexes.length > 0);
-    expect(table, "fixture needs a table with indexes").toBeDefined();
-    const index = table!.indexes[0] as unknown as Record<string, unknown>;
-    for (const key of ["name", "columns", "is_unique", "is_primary", "filter", "index_type", "included_columns", "comment"]) {
-      expect(Object.hasOwn(index, key), `index must always carry ${key}`).toBe(true);
-    }
+  it("ProjectMeta has exactly the keys types.ts declares", () => {
+    pinShape("ProjectMeta", [loadFixture().project], ["name", "databaseType", "database", "schemas", "generatedAt", "note"]);
+  });
+
+  it("DocTable has exactly the keys types.ts declares", () => {
+    pinShape("DocTable", loadFixture().tables, ["schema", "name", "kind", "columns", "indexes", "foreignKeys", "groupId", "note", "noteSource", "shadowedNote", "columnNotes", "estimatedRows", "viewDefinition"]);
+  });
+
+  it("ColumnInfo has exactly the keys types.ts declares", () => {
+    // The required ten are required because Rust has no skip_serializing_if on
+    // them. The optional three DO carry one, so the key is absent rather than
+    // null when there is no value.
+    const columns = loadFixture().tables.flatMap((table) => table.columns);
+    pinShape("ColumnInfo", columns, ["name", "data_type", "is_nullable", "column_default", "is_primary_key", "extra", "comment", "numeric_precision", "numeric_scale", "character_maximum_length"], ["enum_values", "character_set", "collation"]);
+  });
+
+  it("IndexInfo has exactly the keys types.ts declares", () => {
+    const indexes = loadFixture().tables.flatMap((table) => table.indexes);
+    pinShape("IndexInfo", indexes, ["name", "columns", "is_unique", "is_primary", "filter", "index_type", "included_columns", "comment"]);
+  });
+
+  it("ForeignKeyInfo has exactly the keys types.ts declares", () => {
+    const foreignKeys = loadFixture().tables.flatMap((table) => table.foreignKeys);
+    pinShape("ForeignKeyInfo", foreignKeys, ["name", "column", "ref_table", "ref_column"], ["ref_schema", "on_update", "on_delete"]);
+  });
+
+  it("ColumnNote has exactly the keys types.ts declares", () => {
+    const notes = loadFixture().tables.flatMap((table) => Object.values(table.columnNotes));
+    pinShape("ColumnNote", notes, ["note", "source", "shadowed"]);
+  });
+
+  it("Relationship and FieldRef have exactly the keys types.ts declares", () => {
+    const relationships = loadFixture().relationships;
+    pinShape("Relationship", relationships, ["id", "name", "from", "to", "cardinality", "onUpdate", "onDelete"]);
+    pinShape(
+      "FieldRef",
+      relationships.flatMap((relationship) => [relationship.from, relationship.to]),
+      ["schema", "table", "column"],
+    );
+  });
+
+  it("TableGroup has exactly the keys types.ts declares", () => {
+    pinShape("TableGroup", loadFixture().groups, ["id", "name", "hue", "note"]);
+  });
+
+  it("DocEnum has exactly the keys types.ts declares", () => {
+    pinShape("DocEnum", loadFixture().enums, ["schema", "name", "values", "note", "synthesized"]);
   });
 });
