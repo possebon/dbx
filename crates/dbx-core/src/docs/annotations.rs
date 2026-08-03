@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -104,6 +105,51 @@ pub fn load_annotations(path: &Path) -> Result<Option<AnnotationFile>, String> {
         .map_err(|error| format!("Failed to parse notes file {}: {error}", path.display()))?;
 
     Ok(Some(parsed))
+}
+
+/// Write the notes file atomically.
+///
+/// A partial write destroys prose a human typed, and `load_annotations`
+/// errors loudly on malformed JSON — so a torn write becomes "your notes file
+/// is corrupt" the next time the viewer opens. Write a sibling temp file,
+/// flush it to disk, then rename: rename within a directory is atomic on
+/// every platform DBX targets.
+pub fn save_annotations(path: &Path, annotations: &AnnotationFile) -> Result<(), String> {
+    let json =
+        serde_json::to_string_pretty(annotations).map_err(|error| format!("Failed to serialize notes: {error}"))?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
+    }
+
+    let temp = path.with_extension("json.tmp");
+    {
+        let mut file =
+            std::fs::File::create(&temp).map_err(|error| format!("Failed to create {}: {error}", temp.display()))?;
+        file.write_all(json.as_bytes()).map_err(|error| format!("Failed to write {}: {error}", temp.display()))?;
+        file.sync_all().map_err(|error| format!("Failed to flush {}: {error}", temp.display()))?;
+    }
+
+    std::fs::rename(&temp, path).map_err(|error| format!("Failed to replace {}: {error}", path.display()))
+}
+
+/// Where a connection's notes file lives.
+///
+/// An explicit `docs_notes_path` wins — that is the entire point of the field.
+/// Pointing it at a file inside a repository is what lets schema documentation
+/// be reviewed in pull requests. Otherwise the file lives under the app data
+/// directory keyed by connection id, so the feature works with no setup.
+///
+/// Takes the two fields it needs rather than a whole `ConnectionConfig`:
+/// that struct has no `Default` and ~60 fields, so passing it would force
+/// every test to build a literal full of values the function never reads.
+/// `data_dir` is a parameter because `dbx-core` cannot reach the caller's
+/// data directory on its own.
+pub fn resolve_notes_path(connection_id: &str, docs_notes_path: Option<&str>, data_dir: &Path) -> PathBuf {
+    if let Some(path) = docs_notes_path.map(str::trim).filter(|value| !value.is_empty()) {
+        return PathBuf::from(path);
+    }
+    data_dir.join("docs-notes").join(format!("{connection_id}.json"))
 }
 
 /// Merge a notes file into a collected snapshot.
@@ -319,6 +365,110 @@ mod tests {
         let path = std::env::temp_dir().join(format!("dbx-notes-test-{}.json", uuid::Uuid::new_v4()));
         std::fs::write(&path, contents).expect("write temp notes file");
         path
+    }
+
+    fn temp_case_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("dbx-notes-{label}-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let dir = temp_case_dir("round-trip");
+        let path = dir.join("notes.json");
+        let file = AnnotationFile {
+            format_version: 1,
+            project: Some(ProjectAnnotation { name: Some("P".into()), note: Some("hello".into()) }),
+            groups: vec![GroupAnnotation { id: "g".into(), name: "G".into(), hue: 200, note: None }],
+            tables: BTreeMap::from([(
+                "public.t".to_string(),
+                TableAnnotation { group: Some("g".into()), note: Some("n".into()), columns: BTreeMap::new() },
+            )]),
+        };
+
+        save_annotations(&path, &file).expect("save");
+        let loaded = load_annotations(&path).expect("load").expect("present");
+
+        assert_eq!(loaded.format_version, 1);
+        assert_eq!(loaded.groups[0].hue, 200);
+        assert_eq!(loaded.tables["public.t"].note.as_deref(), Some("n"));
+        assert_eq!(loaded.project.and_then(|p| p.note).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn save_creates_missing_parent_directories() {
+        let dir = temp_case_dir("nested");
+        let path = dir.join("nested").join("deeper").join("notes.json");
+        let file = AnnotationFile { format_version: 1, project: None, groups: Vec::new(), tables: BTreeMap::new() };
+        save_annotations(&path, &file).expect("save into a new directory");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn save_leaves_no_temp_file_behind() {
+        // A stray notes.json.tmp would be picked up by nothing, but it means
+        // the rename did not happen and the write was not atomic.
+        let dir = temp_case_dir("no-temp-left");
+        let path = dir.join("notes.json");
+        let file = AnnotationFile { format_version: 1, project: None, groups: Vec::new(), tables: BTreeMap::new() };
+        save_annotations(&path, &file).expect("save");
+
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn a_failed_save_leaves_the_previous_file_intact() {
+        // The reason for writing to a temp file and renaming. If the write
+        // fails partway, the reader must still find the last good notes —
+        // load_annotations errors loudly on malformed JSON, so a torn write
+        // would read as "your notes file is corrupt".
+        let dir = temp_case_dir("failed-save");
+        let path = dir.join("notes.json");
+        let good = AnnotationFile {
+            format_version: 1,
+            project: None,
+            groups: Vec::new(),
+            tables: BTreeMap::from([(
+                "public.keep".to_string(),
+                TableAnnotation { group: None, note: Some("survives".into()), columns: BTreeMap::new() },
+            )]),
+        };
+        save_annotations(&path, &good).expect("first save");
+
+        // A directory where the temp file wants to be makes File::create fail.
+        std::fs::create_dir(path.with_extension("json.tmp")).expect("block the temp path");
+        let result = save_annotations(&path, &good);
+
+        assert!(result.is_err(), "save must fail when the temp path is unusable");
+        let loaded = load_annotations(&path).expect("load").expect("present");
+        assert_eq!(loaded.tables["public.keep"].note.as_deref(), Some("survives"));
+    }
+
+    #[test]
+    fn an_explicit_notes_path_wins_over_the_default() {
+        let resolved = resolve_notes_path("conn-1", Some("/tmp/team/schema-notes.json"), std::path::Path::new("/data"));
+        assert_eq!(resolved, std::path::PathBuf::from("/tmp/team/schema-notes.json"));
+    }
+
+    #[test]
+    fn the_default_notes_path_is_keyed_by_connection_id() {
+        let resolved = resolve_notes_path("conn-1", None, std::path::Path::new("/data"));
+        assert_eq!(resolved, std::path::PathBuf::from("/data/docs-notes/conn-1.json"));
+    }
+
+    #[test]
+    fn a_blank_notes_path_falls_back_to_the_default() {
+        // An empty string in the config is a cleared field, not a path to a
+        // file named "". Treating it as explicit would resolve to garbage.
+        let resolved = resolve_notes_path("conn-1", Some("   "), std::path::Path::new("/data"));
+        assert_eq!(resolved, std::path::PathBuf::from("/data/docs-notes/conn-1.json"));
     }
 
     #[test]
