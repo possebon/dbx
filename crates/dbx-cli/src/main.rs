@@ -112,6 +112,22 @@ impl CliError {
     }
 }
 
+/// `--notes` names a file explicitly, so a missing one is a typo rather than
+/// "no notes yet".
+///
+/// `load_annotations` deliberately returns `Ok(None)` for a missing file,
+/// because the implicit per-connection notes path may legitimately not exist
+/// yet. That is the right behaviour there and the wrong behaviour here: without
+/// this check, `--notes ./typo.json` produces DBML with every note silently
+/// absent and no diagnostic at all, which reads exactly like a database that
+/// has no documentation.
+fn require_notes_file(path: &std::path::Path) -> Result<(), CliError> {
+    if path.exists() {
+        return Ok(());
+    }
+    Err(CliError::new("NOTES_NOT_FOUND", format!("Notes file {} does not exist.", path.display())))
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Diagnostics {
@@ -457,6 +473,7 @@ async fn run_dbml(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, Cli
     let mut snapshot = backend.collect_docs_snapshot(&connection, &database, options).await.map_err(command_error)?;
 
     if let Some(path) = flags.notes.as_ref() {
+        require_notes_file(path)?;
         if let Some(annotations) = dbx_core::docs::annotations::load_annotations(path)
             .map_err(|error| CliError::new("NOTES_INVALID", error))?
         {
@@ -888,6 +905,25 @@ fn usage() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn require_notes_file_accepts_an_existing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("notes.json");
+        std::fs::write(&path, "{}").expect("write");
+        assert!(require_notes_file(&path).is_ok());
+    }
+
+    #[test]
+    fn require_notes_file_rejects_a_mistyped_path() {
+        // The regression: without this, `--notes ./typo.json` emitted DBML with
+        // every note missing and printed nothing, indistinguishable from a
+        // database that genuinely has no documentation.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let error = require_notes_file(&dir.path().join("typo.json")).expect_err("missing file must error");
+        assert_eq!(error.code, "NOTES_NOT_FOUND");
+        assert!(error.message.contains("typo.json"), "message names the path: {}", error.message);
+    }
     use async_trait::async_trait;
     use dbx_core::{
         agent_events::ToolResult,
