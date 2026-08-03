@@ -1,7 +1,10 @@
+import docs from "./docs/en";
+
 export default {
   app: {
     name: "DBX",
   },
+  docs,
   auth: {
     rateLimited: "Please try again in {seconds}s",
     setupTitle: "Set up access password",

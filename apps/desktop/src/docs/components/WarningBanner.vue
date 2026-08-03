@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { useI18n } from "vue-i18n";
 import { describeWarning } from "../docsWarnings";
 import type { SnapshotWarning } from "../types";
 
@@ -7,8 +8,14 @@ const props = defineProps<{
   warnings: SnapshotWarning[];
 }>();
 
+// describeWarning takes a translator rather than calling useI18n() itself, so
+// that docsWarnings.ts stays importable from the standalone HTML export (see
+// its Translate doc comment). This component always runs inside a live Vue
+// app, so useI18n() here is safe.
+const { t } = useI18n();
+
 // Keyed by index: two warnings of the same kind can carry identical text.
-const notices = computed(() => props.warnings.map((warning, index) => ({ key: `${warning.kind}-${index}`, ...describeWarning(warning) })));
+const notices = computed(() => props.warnings.map((warning, index) => ({ key: `${warning.kind}-${index}`, ...describeWarning(warning, t) })));
 </script>
 
 <template>

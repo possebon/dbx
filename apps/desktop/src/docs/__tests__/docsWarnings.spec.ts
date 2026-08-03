@@ -1,44 +1,59 @@
 import { describe, expect, it } from "vitest";
-import { describeWarning } from "../docsWarnings";
+import { describeWarning, type Translate } from "../docsWarnings";
 import type { SnapshotWarning } from "../types";
+
+// A fake translator that echoes the key and params back rather than English
+// prose. This is what actually matters now: that describeWarning calls
+// translate with the right key and the right params, not what the English
+// copy says — the copy itself lives in the i18n namespace and is covered by
+// the parity test.
+const translate: Translate = (key, params) => `${key}|${JSON.stringify(params ?? {})}`;
 
 describe("describeWarning", () => {
   it("explains a skipped table as a warning naming the table and reason", () => {
-    const notice = describeWarning({ kind: "tableSkipped", table: "public.secret", reason: "permission denied" });
+    const notice = describeWarning({ kind: "tableSkipped", table: "public.secret", reason: "permission denied" }, translate);
     expect(notice.severity).toBe("warning");
-    expect(notice.detail).toContain("public.secret");
-    expect(notice.detail).toContain("permission denied");
+    expect(notice.title).toBe("docs.warnings.tableSkipped.title|{}");
+    expect(notice.detail).toBe('docs.warnings.tableSkipped.detail|{"table":"public.secret","reason":"permission denied"}');
   });
 
   it("explains missing foreign-key metadata as an engine limitation, not a fault", () => {
-    const notice = describeWarning({ kind: "noForeignKeyMetadata", engine: "ClickHouse" });
-    expect(notice.detail).toContain("ClickHouse");
-    // The diagram will have no edges — the user must learn why.
-    expect(notice.detail.toLowerCase()).toContain("relationship");
+    const notice = describeWarning({ kind: "noForeignKeyMetadata", engine: "ClickHouse" }, translate);
+    expect(notice.severity).toBe("info");
+    expect(notice.title).toBe("docs.warnings.noForeignKeyMetadata.title|{}");
+    expect(notice.detail).toBe('docs.warnings.noForeignKeyMetadata.detail|{"engine":"ClickHouse"}');
   });
 
   it("explains unsupported comments", () => {
-    const notice = describeWarning({ kind: "commentsUnsupported", engine: "SQLite" });
-    expect(notice.detail).toContain("SQLite");
+    const notice = describeWarning({ kind: "commentsUnsupported", engine: "SQLite" }, translate);
+    expect(notice.severity).toBe("info");
+    expect(notice.title).toBe("docs.warnings.commentsUnsupported.title|{}");
+    expect(notice.detail).toBe('docs.warnings.commentsUnsupported.detail|{"engine":"SQLite"}');
   });
 
   it("reports orphaned notes with the count", () => {
-    const notice = describeWarning({ kind: "orphanedNotes", count: 3 });
-    expect(notice.detail).toContain("3");
+    const notice = describeWarning({ kind: "orphanedNotes", count: 3 }, translate);
+    expect(notice.severity).toBe("warning");
+    expect(notice.title).toBe("docs.warnings.orphanedNotes.title|{}");
+    expect(notice.detail).toBe('docs.warnings.orphanedNotes.detail|{"count":3}');
   });
 
   it("explains a DBML omission naming the item", () => {
-    const notice = describeWarning({
-      kind: "dbmlOmitted",
-      table: "public.orders",
-      item: "idx_orders_open",
-      reason: "partial index filter has no DBML equivalent",
-    });
+    const notice = describeWarning(
+      {
+        kind: "dbmlOmitted",
+        table: "public.orders",
+        item: "idx_orders_open",
+        reason: "partial index filter has no DBML equivalent",
+      },
+      translate,
+    );
     expect(notice.severity).toBe("info");
-    expect(notice.detail).toContain("idx_orders_open");
+    expect(notice.title).toBe("docs.warnings.dbmlOmitted.title|{}");
+    expect(notice.detail).toBe('docs.warnings.dbmlOmitted.detail|{"item":"idx_orders_open","table":"public.orders","reason":"partial index filter has no DBML equivalent"}');
   });
 
-  it("never returns an empty or placeholder string for any known kind", () => {
+  it("never returns an empty title or detail for any known kind", () => {
     const samples: SnapshotWarning[] = [
       { kind: "tableSkipped", table: "t", reason: "r" },
       { kind: "noForeignKeyMetadata", engine: "e" },
@@ -47,11 +62,9 @@ describe("describeWarning", () => {
       { kind: "dbmlOmitted", table: "t", item: "i", reason: "r" },
     ];
     for (const sample of samples) {
-      const notice = describeWarning(sample);
+      const notice = describeWarning(sample, translate);
       expect(notice.title.length, `empty title for ${sample.kind}`).toBeGreaterThan(0);
       expect(notice.detail.length, `empty detail for ${sample.kind}`).toBeGreaterThan(0);
-      expect(notice.detail).not.toContain("[object Object]");
-      expect(notice.detail).not.toContain("undefined");
     }
   });
 });

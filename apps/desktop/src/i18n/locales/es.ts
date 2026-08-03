@@ -1,9 +1,11 @@
 import { withEnglishFallback } from "./fallback";
+import docs from "./docs/es";
 
 export default withEnglishFallback({
   app: {
     name: "DBX",
   },
+  docs,
   auth: {
     rateLimited: "Vuelva a intentarlo en {seconds} s",
     setupTitle: "Configurar contraseña de acceso",

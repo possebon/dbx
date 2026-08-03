@@ -1,9 +1,11 @@
 import { withEnglishFallback } from "./fallback";
+import docs from "./docs/ko";
 
 export default withEnglishFallback({
   app: {
     name: "DBX",
   },
+  docs,
   auth: {
     rateLimited: "{seconds}초 후에 다시 시도해 주세요",
     setupTitle: "접속 비밀번호 설정",

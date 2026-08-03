@@ -1,9 +1,11 @@
 import { withEnglishFallback } from "./fallback";
+import docs from "./docs/zh-TW";
 
 export default withEnglishFallback({
   app: {
     name: "DBX",
   },
+  docs,
   auth: {
     rateLimited: "請 {seconds} 秒後再試",
     setupTitle: "設定存取密碼",
