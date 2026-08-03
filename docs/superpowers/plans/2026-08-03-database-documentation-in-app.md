@@ -303,8 +303,13 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use dbx_core::connection::AppState;
-use dbx_core::docs::annotations::{load_annotations, resolve_notes_path, save_annotations, AnnotationFile};
-use dbx_core::docs::{apply_annotations, collect_snapshot, CollectOptions, SchemaSnapshot};
+// `apply_annotations` is NOT re-exported at `dbx_core::docs` — that module's
+// `pub use` list covers collector, color, dbml, keys, relations and snapshot,
+// but not annotations. It must come from the submodule path.
+use dbx_core::docs::annotations::{
+    apply_annotations, load_annotations, resolve_notes_path, save_annotations, AnnotationFile,
+};
+use dbx_core::docs::{collect_snapshot, CollectOptions, SchemaSnapshot};
 use dbx_core::models::connection::ConnectionConfig;
 use tauri::State;
 
@@ -383,7 +388,7 @@ pub async fn docs_save_annotations(
 }
 ```
 
-Check `dbx_core::docs`'s re-exports before writing the `use` lines — if `apply_annotations` or `collect_snapshot` is only reachable via a submodule path, use that path and report the correction.
+The `use` lines above are correct as written — I verified them against `crates/dbx-core/src/docs/mod.rs`. `collect_snapshot`, `CollectOptions` and `SchemaSnapshot` ARE re-exported at the `docs` root; `apply_annotations` and friends are NOT, and come from `docs::annotations`.
 
 - [ ] **Step 2: Declare and register**
 
@@ -471,7 +476,7 @@ pub async fn apply_annotations(
 ) -> Result<Json<SchemaSnapshot>, AppError> {
     let config = load_connection(&state, &request.connection_id).await?;
     let mut applied = request.snapshot;
-    dbx_core::docs::apply_annotations(&mut applied, &request.annotations, config.db_type);
+    dbx_core::docs::annotations::apply_annotations(&mut applied, &request.annotations, config.db_type);
     Ok(Json(applied))
 }
 
