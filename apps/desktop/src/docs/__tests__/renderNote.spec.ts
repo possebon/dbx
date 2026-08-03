@@ -64,6 +64,17 @@ describe("renderNote", () => {
     expect(html).not.toContain("<img");
   });
 
+  it.each(["//evil.example.com", "//evil.example.com/a.png"])("drops the protocol-relative URL %s", (href) => {
+    expect(renderNote(`[x](${href})`)).not.toContain("evil.example.com");
+    expect(renderNote(`![x](${href})`)).not.toContain("evil.example.com");
+  });
+
+  it("still allows an ordinary root-relative path", () => {
+    // The // guard must not break the single-slash relative case it sits in
+    // front of.
+    expect(renderNote("[x](/docs/page.html)")).toContain('href="/docs/page.html"');
+  });
+
   it.each(["https://example.com", "http://example.com", "mailto:a@b.com", "#anchor", "./rel.html"])("keeps the safe link target %s", (href) => {
     expect(renderNote(`[ok](${href})`)).toContain(`href="${href}"`);
   });
