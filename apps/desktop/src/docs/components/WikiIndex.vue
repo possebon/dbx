@@ -29,16 +29,18 @@ function tableKey(table: DocTable): string {
       </div>
 
       <ul class="grid gap-1 sm:grid-cols-2 lg:grid-cols-3">
-        <li v-for="table in section.tables" :key="tableKey(table)">
-          <button type="button" class="w-full rounded border border-border bg-background px-2 py-1.5 text-left transition-colors hover:bg-muted/40" @click="emit('select', tableKey(table))">
-            <div class="flex items-baseline gap-1.5">
-              <span class="font-mono text-xs font-medium text-foreground">{{ table.name }}</span>
-              <span v-if="table.kind !== 'TABLE'" class="text-[10px] uppercase text-muted-foreground">
-                {{ table.kind.toLowerCase().replace(/_/g, " ") }}
-              </span>
-            </div>
-            <div v-if="table.note" class="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground" v-html="renderNote(table.note)"></div>
+        <!-- The note renders author markdown, so it can contain an <a>. Inside
+             the <button> that would be invalid nesting and the link would not
+             be keyboard reachable, so the note is a sibling of the button and
+             the <li> carries the card. -->
+        <li v-for="table in section.tables" :key="tableKey(table)" class="flex flex-col gap-0.5 rounded border border-border bg-background px-2 py-1.5 transition-colors hover:bg-muted/40">
+          <button type="button" class="flex w-full items-baseline gap-1.5 text-left" @click="emit('select', tableKey(table))">
+            <span class="font-mono text-xs font-medium text-foreground">{{ table.name }}</span>
+            <span v-if="table.kind !== 'TABLE'" class="text-[10px] uppercase text-muted-foreground">
+              {{ table.kind.toLowerCase().replace(/_/g, " ") }}
+            </span>
           </button>
+          <div v-if="table.note" class="line-clamp-2 text-[11px] text-muted-foreground" v-html="renderNote(table.note)"></div>
         </li>
       </ul>
     </section>
