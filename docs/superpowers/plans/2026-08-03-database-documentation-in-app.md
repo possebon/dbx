@@ -315,12 +315,13 @@ async fn connection_of(state: &Arc<AppState>, connection_id: &str) -> Result<Con
 
 /// The notes file for a connection, resolved against DBX's data directory.
 ///
-/// `app_data_dir()` lives in dbx-mcp, so dbx-core takes the directory as a
-/// parameter and this is where the two meet.
+/// `AppState.storage.data_dir()` is the directory DBX is actually using — it
+/// honours a custom data dir, which a fresh `app_data_dir()` lookup would not.
+/// (`dbx-mcp::paths::app_data_dir()` is NOT available here: src-tauri does not
+/// depend on dbx-mcp.)
 async fn notes_path_of(state: &Arc<AppState>, connection_id: &str) -> Result<std::path::PathBuf, String> {
     let config = connection_of(state, connection_id).await?;
-    let data_dir = dbx_mcp::paths::app_data_dir()?;
-    Ok(resolve_notes_path(&config, &data_dir))
+    Ok(resolve_notes_path(&config, state.storage.data_dir()))
 }
 
 /// Collect a RAW snapshot — annotations are applied separately, so the
@@ -448,9 +449,11 @@ pub struct DocsSaveRequest {
     pub annotations: dbx_core::docs::annotations::AnnotationFile,
 }
 
-fn notes_path_for(config: &ConnectionConfig) -> Result<std::path::PathBuf, AppError> {
-    let data_dir = dbx_mcp::paths::app_data_dir().map_err(AppError::from)?;
-    Ok(dbx_core::docs::annotations::resolve_notes_path(config, &data_dir))
+/// `WebState` already carries the data directory (`pub data_dir: PathBuf`), so
+/// this needs no lookup and no new dependency — dbx-web does NOT depend on
+/// dbx-mcp.
+fn notes_path_for(state: &Arc<WebState>, config: &ConnectionConfig) -> std::path::PathBuf {
+    dbx_core::docs::annotations::resolve_notes_path(config, &state.data_dir)
 }
 
 pub async fn load_annotations(
@@ -458,7 +461,7 @@ pub async fn load_annotations(
     Json(request): Json<DocsAnnotationsRequest>,
 ) -> Result<Json<Option<dbx_core::docs::annotations::AnnotationFile>>, AppError> {
     let config = load_connection(&state, &request.connection_id).await?;
-    let path = notes_path_for(&config)?;
+    let path = notes_path_for(&state, &config);
     Ok(Json(dbx_core::docs::annotations::load_annotations(&path).map_err(AppError::from)?))
 }
 
@@ -477,13 +480,13 @@ pub async fn save_annotations(
     Json(request): Json<DocsSaveRequest>,
 ) -> Result<Json<()>, AppError> {
     let config = load_connection(&state, &request.connection_id).await?;
-    let path = notes_path_for(&config)?;
+    let path = notes_path_for(&state, &config);
     dbx_core::docs::annotations::save_annotations(&path, &request.annotations).map_err(AppError::from)?;
     Ok(Json(()))
 }
 ```
 
-If `dbx-web` does not already depend on `dbx-mcp`, do NOT add the dependency — stop and report. In that case the data directory must come from `WebState` or an existing web-side helper, and I will resolve it rather than have you invent one.
+Do NOT add a `dbx-mcp` dependency to `dbx-web` — it has none, and it does not need one. `WebState` already carries `pub data_dir: PathBuf`, which is what the handlers use.
 
 - [ ] **Step 2: Register the routes**
 
