@@ -1384,6 +1384,10 @@ git commit -m "feat(docs): add the enum page and its reverse column lookup"
 **Interfaces:**
 - Produces: `DocsApp` props `snapshot: SchemaSnapshot`, `annotations: AnnotationFile`, `readonly?: boolean`, `translate: Translate`; emits `edit` with a discriminated payload
 
+**`snapshot` and `translate` already exist** on `DocsApp` (`translate` was added when the i18n task
+made `describeWarning` take a translator). You are ADDING `annotations` and `readonly` to the
+existing `defineProps`, not writing it from scratch. `readonly` is the only optional one.
+
 - [ ] **Step 1: Define the edit payload**
 
 In `apps/desktop/src/docs/types.ts`:
@@ -1420,7 +1424,9 @@ export type DocsEdit =
   });
 ```
 
-- [ ] **Step 3: Thread `readonly`, `annotations` and `translate` down; emit `edit` up**
+- [ ] **Step 3: Thread `readonly` and `annotations` down; emit `edit` up**
+
+`translate` is already threaded to `WarningBanner`; extend the same pattern to the other components as they gain strings.
 
 `DocsApp` gains the props and re-emits `edit` from its children. Each component renders a `NoteEditor` where a note belongs and emits the matching `DocsEdit`. When `readonly` is true, no editor is interactive and `GroupEditor` / `GroupPicker` are not rendered.
 
