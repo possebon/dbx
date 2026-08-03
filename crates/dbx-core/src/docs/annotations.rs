@@ -108,8 +108,29 @@ mod tests {
         let parsed: AnnotationFile = serde_json::from_str(SAMPLE).expect("parse");
         let written = serde_json::to_string(&parsed).expect("serialize");
         let reparsed: AnnotationFile = serde_json::from_str(&written).expect("reparse");
+
+        // Every field in SAMPLE must survive a write/read cycle. Asserting
+        // only a count here would pass against a model that silently drops
+        // fields on write via a wrong skip_serializing_if predicate.
+        assert_eq!(reparsed.format_version, 1);
+
+        let project = reparsed.project.as_ref().expect("project survived");
+        assert_eq!(project.name.as_deref(), Some("Ecommerce"));
+        assert_eq!(project.note.as_deref(), Some("# Overview"));
+
+        assert_eq!(reparsed.groups.len(), 1);
+        let group = &reparsed.groups[0];
+        assert_eq!(group.id, "order-management");
+        assert_eq!(group.name, "Order Management");
+        assert_eq!(group.hue, 28);
+        assert_eq!(group.note.as_deref(), Some("Checkout to handoff."));
+
         assert_eq!(reparsed.tables.len(), 1);
-        assert_eq!(reparsed.groups[0].name, "Order Management");
+        let orders = reparsed.tables.get("core.orders").expect("orders survived");
+        assert_eq!(orders.group.as_deref(), Some("order-management"));
+        assert_eq!(orders.note.as_deref(), Some("One row per checkout."));
+        assert_eq!(orders.columns.len(), 1);
+        assert_eq!(orders.columns.get("status").expect("column survived").note, "State machine.");
     }
 
     #[test]
