@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { searchDocs } from "../docsSearch";
+import { searchDocs, type SearchHit } from "../docsSearch";
 import type { DocTable, SchemaSnapshot } from "../types";
 
 function column(name: string) {
@@ -49,6 +49,26 @@ const snapshot: SchemaSnapshot = {
   warnings: [],
 };
 
+// Columns outnumber every other kind by two orders of magnitude in a real
+// database — the fixture answers "e" with 133 columns against 1 group and 12
+// enums. This snapshot reproduces that shape: one term matching more of each
+// kind than its cap allows.
+const flooded: SchemaSnapshot = {
+  formatVersion: 1,
+  project: { name: "p", databaseType: "postgres", database: null, schemas: [], generatedAt: "", note: null },
+  tables: [
+    table(
+      "public",
+      "notes",
+      Array.from({ length: 30 }, (_, index) => `note_${index}`),
+    ),
+  ],
+  relationships: [],
+  groups: Array.from({ length: 12 }, (_, index) => ({ id: `g${index}`, name: `note group ${index}`, hue: 28, note: null })),
+  enums: Array.from({ length: 12 }, (_, index) => ({ schema: "public", name: `note_enum_${index}`, values: ["pending"], note: null, synthesized: false })),
+  warnings: [],
+};
+
 describe("searchDocs", () => {
   it("returns nothing for an empty query", () => {
     expect(searchDocs(snapshot, "")).toEqual([]);
@@ -93,6 +113,30 @@ describe("searchDocs", () => {
   it("carries a tableKey so a hit can navigate", () => {
     const hit = searchDocs(snapshot, "total").find((candidate) => candidate.kind === "column");
     expect(hit!.tableKey).toBe("public.orders");
+  });
+
+  it("still returns group and enum hits when columns flood the results", () => {
+    // A single cap applied after concatenation deletes the tail of the list,
+    // and groups and enums are the tail — making them unreachable through
+    // search no matter what the user types.
+    const hits = searchDocs(flooded, "note");
+    expect(
+      hits.some((hit) => hit.kind === "group"),
+      "groups must survive a column flood",
+    ).toBe(true);
+    expect(
+      hits.some((hit) => hit.kind === "enum"),
+      "enums must survive a column flood",
+    ).toBe(true);
+  });
+
+  it("caps each kind independently", () => {
+    const hits = searchDocs(flooded, "note");
+    const count = (kind: SearchHit["kind"]) => hits.filter((hit) => hit.kind === kind).length;
+    expect(count("table")).toBe(1);
+    expect(count("column")).toBe(20);
+    expect(count("group")).toBe(10);
+    expect(count("enum")).toBe(10);
   });
 
   it("matches a mixed-case identifier from a lowercase query", () => {

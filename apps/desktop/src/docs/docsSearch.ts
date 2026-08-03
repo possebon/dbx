@@ -13,11 +13,18 @@ function qualified(schema: string | null, name: string): string {
   return schema ? `${schema}.${name}` : name;
 }
 
+/** Per-kind result caps. A single overall cap lets columns — by far the most
+ *  numerous kind — crowd groups and enums out of the list entirely. */
+const LIMITS = { table: 20, column: 20, group: 10, enum: 10 } as const;
+
 /**
  * Case-insensitive substring search over the whole snapshot.
  *
  * Tables rank first: someone typing a table's name almost always wants the
  * table, not a column that happens to share the word.
+ *
+ * Results are capped per kind — see LIMITS. This is the only place results are
+ * limited; callers render everything they are handed.
  */
 export function searchDocs(snapshot: SchemaSnapshot, query: string): SearchHit[] {
   const needle = query.trim().toLowerCase();
@@ -58,5 +65,5 @@ export function searchDocs(snapshot: SchemaSnapshot, query: string): SearchHit[]
       tableKey: null,
     }));
 
-  return [...tables, ...columns, ...groups, ...enums];
+  return [...tables.slice(0, LIMITS.table), ...columns.slice(0, LIMITS.column), ...groups.slice(0, LIMITS.group), ...enums.slice(0, LIMITS.enum)];
 }

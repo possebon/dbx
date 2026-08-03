@@ -15,8 +15,9 @@ const open = ref(false);
 const query = ref("");
 const input = ref<HTMLInputElement | null>(null);
 
-// Capped so a one-letter query cannot render every column in the database.
-const hits = computed(() => searchDocs(props.snapshot, query.value).slice(0, 40));
+// searchDocs caps its own results, per kind. Slicing again here would just
+// re-create the bug where columns crowd out every other kind.
+const hits = computed(() => searchDocs(props.snapshot, query.value));
 
 async function show(): Promise<void> {
   open.value = true;
