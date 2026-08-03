@@ -3,6 +3,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::docs::keys::{fold_identifier, table_key};
+use crate::docs::{ColumnNote, NoteSource, SchemaSnapshot, TableGroup};
+use crate::models::connection::DatabaseType;
+
 /// The on-disk notes file. This IS the store — not a cache of anything.
 /// It is meant to be committed to a repository and reviewed in pull
 /// requests, so it must stay small, readable, and stable in key order.
@@ -100,6 +104,73 @@ pub fn load_annotations(path: &Path) -> Result<Option<AnnotationFile>, String> {
         .map_err(|error| format!("Failed to parse notes file {}: {error}", path.display()))?;
 
     Ok(Some(parsed))
+}
+
+/// Merge a notes file into a collected snapshot.
+///
+/// Precedence is `local ?? database_comment`. When a local note shadows a
+/// database comment the comment is kept in `shadowed_note`, so a later
+/// `COMMENT ON` improvement stays visible rather than being silently hidden.
+pub fn apply_annotations(snapshot: &mut SchemaSnapshot, annotations: &AnnotationFile, db_type: DatabaseType) {
+    if let Some(project) = annotations.project.as_ref() {
+        if let Some(name) = project.name.as_deref().filter(|value| !value.trim().is_empty()) {
+            snapshot.project.name = name.to_string();
+        }
+        if project.note.is_some() {
+            snapshot.project.note = project.note.clone();
+        }
+    }
+
+    let known_groups: std::collections::HashSet<&str> =
+        annotations.groups.iter().map(|group| group.id.as_str()).collect();
+
+    snapshot.groups = annotations
+        .groups
+        .iter()
+        .map(|group| TableGroup {
+            id: group.id.clone(),
+            name: group.name.clone(),
+            hue: group.hue,
+            note: group.note.clone(),
+        })
+        .collect();
+
+    for table in &mut snapshot.tables {
+        let key = table_key(db_type, table.schema.as_deref(), &table.name);
+        let Some(annotation) = annotations.tables.get(&key) else { continue };
+
+        if let Some(note) = annotation.note.as_deref().filter(|value| !value.trim().is_empty()) {
+            // Preserve whatever the database said before overwriting it.
+            if matches!(table.note_source, NoteSource::Database) {
+                table.shadowed_note = table.note.clone();
+            }
+            table.note = Some(note.to_string());
+            table.note_source = NoteSource::Local;
+        }
+
+        // A group reference that names no defined group is dropped rather
+        // than assigned — a dangling id would render an empty group header.
+        table.group_id = annotation.group.as_deref().filter(|id| known_groups.contains(id)).map(ToOwned::to_owned);
+
+        for column in &table.columns {
+            let column_fold = fold_identifier(db_type, &column.name);
+            let annotated = annotation.columns.iter().find(|(name, _)| fold_identifier(db_type, name) == column_fold);
+
+            let Some((_, column_annotation)) = annotated else { continue };
+            if column_annotation.note.trim().is_empty() {
+                continue;
+            }
+
+            table.column_notes.insert(
+                column.name.clone(),
+                ColumnNote {
+                    note: column_annotation.note.clone(),
+                    source: NoteSource::Local,
+                    shadowed: column.comment.clone().filter(|value| !value.trim().is_empty()),
+                },
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -234,5 +305,135 @@ mod tests {
 
         assert!(error.contains("formatVersion 2"), "should name the version, got: {error}");
         assert!(!error.contains("unknown field"), "should not surface a raw serde error, got: {error}");
+    }
+
+    use crate::docs::{DocTable, NoteSource, ProjectMeta, SchemaSnapshot, TableKind};
+    use crate::models::connection::DatabaseType;
+
+    fn snapshot_with(tables: Vec<DocTable>) -> SchemaSnapshot {
+        SchemaSnapshot {
+            format_version: 1,
+            project: ProjectMeta {
+                name: "conn".to_string(),
+                database_type: "postgres".to_string(),
+                database: None,
+                schemas: vec!["core".to_string()],
+                generated_at: String::new(),
+                note: None,
+            },
+            tables,
+            relationships: vec![],
+            groups: vec![],
+            enums: vec![],
+            warnings: vec![],
+        }
+    }
+
+    fn table_named(schema: &str, name: &str, comment: Option<&str>) -> DocTable {
+        DocTable {
+            schema: Some(schema.to_string()),
+            name: name.to_string(),
+            kind: TableKind::Table,
+            columns: vec![],
+            indexes: vec![],
+            foreign_keys: vec![],
+            group_id: None,
+            note: comment.map(ToOwned::to_owned),
+            note_source: if comment.is_some() { NoteSource::Database } else { NoteSource::None },
+            shadowed_note: None,
+            column_notes: BTreeMap::new(),
+            estimated_rows: None,
+            view_definition: None,
+        }
+    }
+
+    #[test]
+    fn a_local_note_shadows_the_database_comment_and_preserves_it() {
+        let mut snapshot = snapshot_with(vec![table_named("core", "orders", Some("Old DB comment."))]);
+        let annotations: AnnotationFile = serde_json::from_str(SAMPLE).expect("parse");
+
+        apply_annotations(&mut snapshot, &annotations, DatabaseType::Postgres);
+
+        let table = &snapshot.tables[0];
+        assert_eq!(table.note.as_deref(), Some("One row per checkout."));
+        assert_eq!(table.note_source, NoteSource::Local);
+        assert_eq!(table.shadowed_note.as_deref(), Some("Old DB comment."));
+    }
+
+    #[test]
+    fn a_database_comment_survives_when_there_is_no_local_note() {
+        let mut snapshot = snapshot_with(vec![table_named("core", "users", Some("From the database."))]);
+        let annotations: AnnotationFile = serde_json::from_str(SAMPLE).expect("parse");
+
+        apply_annotations(&mut snapshot, &annotations, DatabaseType::Postgres);
+
+        let table = &snapshot.tables[0];
+        assert_eq!(table.note.as_deref(), Some("From the database."));
+        assert_eq!(table.note_source, NoteSource::Database);
+        assert_eq!(table.shadowed_note, None);
+    }
+
+    #[test]
+    fn keys_match_case_insensitively_on_postgres() {
+        // The notes file says "core.orders"; the live schema reports "Core"/"Orders".
+        let mut snapshot = snapshot_with(vec![table_named("Core", "Orders", None)]);
+        let annotations: AnnotationFile = serde_json::from_str(SAMPLE).expect("parse");
+
+        apply_annotations(&mut snapshot, &annotations, DatabaseType::Postgres);
+
+        assert_eq!(snapshot.tables[0].note.as_deref(), Some("One row per checkout."));
+    }
+
+    #[test]
+    fn column_notes_are_applied_and_marked_local() {
+        let mut table = table_named("core", "orders", None);
+        table.columns.push(crate::types::ColumnInfo {
+            name: "status".to_string(),
+            data_type: "text".to_string(),
+            ..Default::default()
+        });
+        let mut snapshot = snapshot_with(vec![table]);
+        let annotations: AnnotationFile = serde_json::from_str(SAMPLE).expect("parse");
+
+        apply_annotations(&mut snapshot, &annotations, DatabaseType::Postgres);
+
+        let note = snapshot.tables[0].column_notes.get("status").expect("column note");
+        assert_eq!(note.note, "State machine.");
+        assert_eq!(note.source, NoteSource::Local);
+    }
+
+    #[test]
+    fn the_project_note_and_name_are_applied() {
+        let mut snapshot = snapshot_with(vec![]);
+        let annotations: AnnotationFile = serde_json::from_str(SAMPLE).expect("parse");
+
+        apply_annotations(&mut snapshot, &annotations, DatabaseType::Postgres);
+
+        assert_eq!(snapshot.project.name, "Ecommerce");
+        assert_eq!(snapshot.project.note.as_deref(), Some("# Overview"));
+    }
+
+    #[test]
+    fn groups_are_copied_and_membership_is_assigned() {
+        let mut snapshot = snapshot_with(vec![table_named("core", "orders", None)]);
+        let annotations: AnnotationFile = serde_json::from_str(SAMPLE).expect("parse");
+
+        apply_annotations(&mut snapshot, &annotations, DatabaseType::Postgres);
+
+        assert_eq!(snapshot.groups.len(), 1);
+        assert_eq!(snapshot.groups[0].id, "order-management");
+        assert_eq!(snapshot.groups[0].hue, 28);
+        assert_eq!(snapshot.tables[0].group_id.as_deref(), Some("order-management"));
+    }
+
+    #[test]
+    fn a_table_referencing_an_undefined_group_is_left_ungrouped() {
+        let mut snapshot = snapshot_with(vec![table_named("core", "orders", None)]);
+        let mut annotations: AnnotationFile = serde_json::from_str(SAMPLE).expect("parse");
+        annotations.groups.clear();
+
+        apply_annotations(&mut snapshot, &annotations, DatabaseType::Postgres);
+
+        assert_eq!(snapshot.tables[0].group_id, None, "a dangling group reference must not be assigned");
     }
 }
