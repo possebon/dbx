@@ -112,12 +112,36 @@ pub fn load_annotations(path: &Path) -> Result<Option<AnnotationFile>, String> {
 /// MUST be unique per call: a temp name derived from the target alone is
 /// shared by every concurrent writer, so two saves interleave their bytes into
 /// one file and the last rename publishes the mixture. MUST also be a sibling
-/// — rename is only atomic within a filesystem, and a temp file elsewhere
-/// could land on a different mount.
+/// — rename is only atomic within a filesystem.
+///
+/// The base name is truncated so the whole component stays within the 255-byte
+/// limit most filesystems enforce on a single path component. The wrapper
+/// costs 14 bytes, so a long-but-valid target name would otherwise make every
+/// save fail with ENAMETOOLONG — a regression against the previous 4-byte
+/// `.tmp` suffix. Truncating the base is safe because uniqueness comes from
+/// the uuid, not from the name.
 fn temp_save_path(path: &Path) -> PathBuf {
+    /// Most filesystems cap one path component at 255 bytes.
+    const MAX_COMPONENT: usize = 255;
+    /// `.` + `.` + 8 hex + `.tmp`
+    const WRAPPER: usize = 14;
+
     let name = path.file_name().map(|value| value.to_string_lossy().into_owned()).unwrap_or_default();
+    let budget = MAX_COMPONENT - WRAPPER;
+
+    // Truncate on a char boundary — slicing a String by bytes can split a
+    // multi-byte character and panic.
+    let mut used = 0usize;
+    let trimmed: String = name
+        .chars()
+        .take_while(|character| {
+            used += character.len_utf8();
+            used <= budget
+        })
+        .collect();
+
     let unique = uuid::Uuid::new_v4().simple().to_string();
-    path.with_file_name(format!(".{name}.{}.tmp", &unique[..8]))
+    path.with_file_name(format!(".{trimmed}.{}.tmp", &unique[..8]))
 }
 
 /// Write the notes file atomically.
@@ -549,6 +573,39 @@ mod tests {
             .filter(|name| name.ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn a_long_target_name_still_yields_a_usable_temp_component() {
+        // The wrapper costs 14 bytes. Without a budget, a 245-byte name makes
+        // a 259-byte component and every save fails with ENAMETOOLONG — a
+        // regression against the old 4-byte `.tmp` suffix.
+        let name = format!("{}.json", "a".repeat(240));
+        let target = std::path::Path::new("/data").join(&name);
+        let temp = temp_save_path(&target);
+        let component = temp.file_name().expect("file name").to_string_lossy().len();
+        assert!(component <= 255, "temp component is {component} bytes: {temp:?}");
+    }
+
+    #[test]
+    fn a_long_multibyte_target_name_is_truncated_on_a_char_boundary() {
+        // Slicing a String by bytes can split a multi-byte character and
+        // panic. This name is 3 bytes per character.
+        let name = format!("{}.json", "é".repeat(200));
+        let target = std::path::Path::new("/data").join(&name);
+        let temp = temp_save_path(&target); // must not panic
+        let component = temp.file_name().expect("file name").to_string_lossy().len();
+        assert!(component <= 255, "temp component is {component} bytes");
+    }
+
+    #[test]
+    fn a_long_target_name_still_saves_and_loads() {
+        // End to end: the budget is only useful if the save actually works.
+        let dir = temp_case_dir("long-name");
+        let path = dir.join(format!("{}.json", "a".repeat(200)));
+        let file = AnnotationFile { format_version: 1, project: None, groups: Vec::new(), tables: BTreeMap::new() };
+        save_annotations(&path, &file).expect("save with a long name");
+        assert!(load_annotations(&path).expect("load").is_some());
     }
 
     #[test]
