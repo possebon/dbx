@@ -26,7 +26,7 @@ function scriptOf(file: string): string {
   return `${descriptor.script?.content ?? ""}\n${descriptor.scriptSetup?.content ?? ""}`;
 }
 
-const EXPECTED = ["ColumnTable.vue", "DocsApp.vue", "DocsSearch.vue", "DocsSidebar.vue", "RelationshipList.vue", "TablePage.vue", "WarningBanner.vue", "WikiIndex.vue"];
+const EXPECTED = ["ColumnTable.vue", "DocsApp.vue", "DocsSearch.vue", "DocsSidebar.vue", "GroupEditor.vue", "GroupPicker.vue", "NoteEditor.vue", "RelationshipList.vue", "TablePage.vue", "WarningBanner.vue", "WikiIndex.vue"];
 
 describe("docs viewer component contract", () => {
   it("finds every expected component", () => {
@@ -84,6 +84,17 @@ describe("docs viewer component contract", () => {
       }
       expect(source.includes("innerHTML"), `${path.basename(file)} must not touch innerHTML`).toBe(false);
     }
+  });
+
+  it("editing components accept a readonly mode", () => {
+    // Part 3c renders these same components with editing off inside an
+    // exported HTML file. A component that cannot be made read-only would
+    // have to be forked for the export.
+    const files = vueFiles();
+    expect(files.length).toBe(EXPECTED.length);
+    const editors = files.filter((file) => path.basename(file) === "NoteEditor.vue");
+    expect(editors.length).toBe(1);
+    expect(readFileSync(editors[0], "utf8")).toContain("readonly");
   });
 
   it('uses <script setup lang="ts">', () => {
