@@ -77,17 +77,27 @@ pub fn load_annotations(path: &Path) -> Result<Option<AnnotationFile>, String> {
         Err(error) => return Err(format!("Failed to read notes file {}: {error}", path.display())),
     };
 
-    let parsed: AnnotationFile = serde_json::from_str(&contents)
+    // Read the version BEFORE full deserialization. `deny_unknown_fields`
+    // would otherwise reject a future-format file with a confusing
+    // "unknown field" error, never reaching the version check — defeating
+    // the entire purpose of having a version field.
+    let probe: serde_json::Value = serde_json::from_str(&contents)
         .map_err(|error| format!("Failed to parse notes file {}: {error}", path.display()))?;
 
-    if parsed.format_version != ANNOTATION_FORMAT_VERSION {
-        return Err(format!(
-            "Notes file {} has formatVersion {}, but this build understands {}.",
-            path.display(),
-            parsed.format_version,
-            ANNOTATION_FORMAT_VERSION
-        ));
+    match probe.get("formatVersion").and_then(serde_json::Value::as_u64) {
+        Some(version) if version == u64::from(ANNOTATION_FORMAT_VERSION) => {}
+        Some(version) => {
+            return Err(format!(
+                "Notes file {} has formatVersion {version}, but this build understands {}.",
+                path.display(),
+                ANNOTATION_FORMAT_VERSION
+            ))
+        }
+        None => return Err(format!("Notes file {} is missing formatVersion.", path.display())),
     }
+
+    let parsed: AnnotationFile = serde_json::from_value(probe)
+        .map_err(|error| format!("Failed to parse notes file {}: {error}", path.display()))?;
 
     Ok(Some(parsed))
 }
@@ -188,24 +198,41 @@ mod tests {
     #[test]
     fn a_valid_file_loads() {
         let path = temp_notes(SAMPLE);
-        let loaded = load_annotations(&path).expect("load").expect("some");
-        assert_eq!(loaded.tables.len(), 1);
+        let loaded = load_annotations(&path);
         let _ = std::fs::remove_file(&path);
+        let loaded = loaded.expect("load").expect("some");
+        assert_eq!(loaded.tables.len(), 1);
     }
 
     #[test]
     fn a_malformed_file_is_a_hard_error_naming_the_path() {
         let path = temp_notes("{ this is not json");
-        let error = load_annotations(&path).expect_err("must fail");
-        assert!(error.contains(&path.display().to_string()), "error must name the file: {error}");
+        let error = load_annotations(&path);
         let _ = std::fs::remove_file(&path);
+        let error = error.expect_err("must fail");
+        assert!(error.contains(&path.display().to_string()), "error must name the file: {error}");
     }
 
     #[test]
     fn an_unsupported_format_version_is_rejected() {
         let path = temp_notes(r#"{"formatVersion": 99}"#);
-        let error = load_annotations(&path).expect_err("must fail");
-        assert!(error.contains("99"), "error must name the version: {error}");
+        let error = load_annotations(&path);
         let _ = std::fs::remove_file(&path);
+        let error = error.expect_err("must fail");
+        assert!(error.contains("99"), "error must name the version: {error}");
+    }
+
+    #[test]
+    fn a_future_format_version_reports_the_version_not_an_unknown_field() {
+        // deny_unknown_fields must NOT pre-empt the version check — a v1
+        // build reading a v2 file has to say so, or the version field is
+        // useless exactly when it is needed.
+        let path = temp_notes(r#"{"formatVersion": 2, "someNewField": {"a": 1}}"#);
+        let error = load_annotations(&path);
+        let _ = std::fs::remove_file(&path);
+        let error = error.expect_err("must fail");
+
+        assert!(error.contains("formatVersion 2"), "should name the version, got: {error}");
+        assert!(!error.contains("unknown field"), "should not surface a raw serde error, got: {error}");
     }
 }
