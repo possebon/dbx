@@ -72,8 +72,11 @@ describe("docs viewer component contract", () => {
     expect(files.length).toBe(EXPECTED.length);
     for (const file of files) {
       const source = readFileSync(file, "utf8");
-      for (const match of source.matchAll(/v-html\s*=\s*"([^"]*)"/g)) {
-        expect(match[1], `${path.basename(file)}: v-html must render renderNote output`).toContain("renderNote");
+      // Either quote style. A double-quote-only pattern finds zero matches in
+      // `v-html='table.note'` and passes it, which is the exact binding this
+      // test exists to catch.
+      for (const match of source.matchAll(/v-html\s*=\s*(["'])(.*?)\1/g)) {
+        expect(match[2], `${path.basename(file)}: v-html must render renderNote output`).toContain("renderNote");
       }
       expect(source.includes("innerHTML"), `${path.basename(file)} must not touch innerHTML`).toBe(false);
     }
