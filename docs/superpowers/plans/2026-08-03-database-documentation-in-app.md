@@ -1171,7 +1171,22 @@ Expected: FAIL on the file list — the three components do not exist.
 
 `NoteEditor.vue` — renders `renderNote` output until clicked, then a raw markdown textarea. The `v-html` must bind `renderNote(...)`; the contract test enforces it in either quote style. When `readonly` is true it never becomes editable.
 
-`GroupEditor.vue` — a name input plus the hue picker from the approved mock: 12 preset swatches, a `<input type="range" min="0" max="359">`, and a preview element rendering the colour on light and dark grounds at once. Use `class="docs-group"` with `:style="groupStyle(hue)"` on the same element; never compute a colour in the template — the contract test forbids `oklch(` and hex literals.
+`GroupEditor.vue` — a name input plus the hue picker from the approved mock: 12 preset swatches, a
+`<input type="range" min="0" max="359">`, and a preview element rendering the colour on light and
+dark grounds at once.
+
+**Match the swatch idiom DBX already uses**, in `ConnectionDialog.vue:4921-4931` — a row of
+`h-6 w-6 rounded-full border` buttons inside `flex items-center gap-1.5`, selected state
+`ring-2 ring-ring ring-offset-2`, unselected `border-border`, each with a `:title` from an i18n key.
+Read it before writing yours so the new picker looks native rather than invented.
+
+**But do NOT copy how it fills them.** Connection colours are hex values painted with Tailwind
+classes (`bg-green-500`, `#22c55e`). Group colours are hues: the swatch must carry
+`class="docs-group"` and `:style="groupStyle(hue)"` on the SAME element, and the colour is decided
+by `docs.css`. The contract test forbids `oklch(` and six-digit hex literals in these components,
+so a naive copy of `ConnectionDialog`'s approach fails the test — correctly, because a hardcoded
+hex cannot stay legible on both light and dark grounds, which is the entire reason groups store a
+hue rather than a colour.
 
 `GroupPicker.vue` — a `<select>` over `groups` plus a "New group…" option emitting `create`.
 
