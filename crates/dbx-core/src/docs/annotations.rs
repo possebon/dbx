@@ -3,8 +3,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::docs::keys::{fold_identifier, table_key};
-use crate::docs::{ColumnNote, NoteSource, SchemaSnapshot, TableGroup};
+use crate::docs::keys::{column_key, fold_identifier, table_key};
+use crate::docs::{ColumnNote, NoteSource, SchemaSnapshot, SnapshotWarning, TableGroup};
 use crate::models::connection::DatabaseType;
 
 /// The on-disk notes file. This IS the store — not a cache of anything.
@@ -124,9 +124,13 @@ pub fn apply_annotations(snapshot: &mut SchemaSnapshot, annotations: &Annotation
     let known_groups: std::collections::HashSet<&str> =
         annotations.groups.iter().map(|group| group.id.as_str()).collect();
 
+    let mut seen_group_ids = std::collections::HashSet::new();
     snapshot.groups = annotations
         .groups
         .iter()
+        // A duplicate id would emit two TableGroup blocks with the same
+        // name, which is invalid DBML. First occurrence wins.
+        .filter(|group| seen_group_ids.insert(group.id.as_str()))
         .map(|group| TableGroup {
             id: group.id.clone(),
             name: group.name.clone(),
@@ -171,6 +175,63 @@ pub fn apply_annotations(snapshot: &mut SchemaSnapshot, annotations: &Annotation
             );
         }
     }
+
+    let orphans = detect_orphans(snapshot, annotations, db_type);
+    if !orphans.is_empty() {
+        snapshot.warnings.push(SnapshotWarning::OrphanedNotes { count: orphans.len() });
+    }
+}
+
+/// Annotation keys whose target no longer exists in the collected schema.
+///
+/// Returns fully-qualified keys, sorted, so the caller can list them for a
+/// human to re-map. This function NEVER mutates the notes file — user prose
+/// is only ever removed by an explicit human action.
+///
+/// Suggestions for where a renamed target went are deliberately absent:
+/// producing them requires the OLD schema to diff against, and the notes
+/// file stores prose only. That becomes possible once snapshot history
+/// exists (see the spec's deferred versioning seam).
+pub fn detect_orphans(snapshot: &SchemaSnapshot, annotations: &AnnotationFile, db_type: DatabaseType) -> Vec<String> {
+    use std::collections::HashSet;
+
+    let live_tables: HashSet<String> =
+        snapshot.tables.iter().map(|table| table_key(db_type, table.schema.as_deref(), &table.name)).collect();
+
+    let live_columns: HashSet<String> = snapshot
+        .tables
+        .iter()
+        .flat_map(|table| {
+            table
+                .columns
+                .iter()
+                .map(move |column| column_key(db_type, table.schema.as_deref(), &table.name, &column.name))
+        })
+        .collect();
+
+    let mut orphans = Vec::new();
+
+    for (key, annotation) in &annotations.tables {
+        let folded_table = fold_key(db_type, key);
+        if !live_tables.contains(&folded_table) {
+            orphans.push(folded_table);
+            continue;
+        }
+        for column in annotation.columns.keys() {
+            let folded_column = format!("{folded_table}.{}", fold_identifier(db_type, column));
+            if !live_columns.contains(&folded_column) {
+                orphans.push(folded_column);
+            }
+        }
+    }
+
+    orphans.sort();
+    orphans
+}
+
+/// Fold an already-dotted key (e.g. `Core.Orders`) segment by segment.
+fn fold_key(db_type: DatabaseType, key: &str) -> String {
+    key.split('.').map(|segment| fold_identifier(db_type, segment)).collect::<Vec<_>>().join(".")
 }
 
 #[cfg(test)]
@@ -435,5 +496,91 @@ mod tests {
         apply_annotations(&mut snapshot, &annotations, DatabaseType::Postgres);
 
         assert_eq!(snapshot.tables[0].group_id, None, "a dangling group reference must not be assigned");
+    }
+
+    #[test]
+    fn duplicate_group_ids_collapse_to_one_entry() {
+        // Two TableGroup blocks sharing an id is invalid DBML.
+        let mut snapshot = snapshot_with(vec![table_named("core", "orders", None)]);
+        let mut annotations: AnnotationFile = serde_json::from_str(SAMPLE).expect("parse");
+        let mut dup = annotations.groups[0].clone();
+        dup.name = "Duplicate".to_string();
+        annotations.groups.push(dup);
+
+        apply_annotations(&mut snapshot, &annotations, DatabaseType::Postgres);
+
+        assert_eq!(snapshot.groups.len(), 1, "duplicate ids must collapse");
+        assert_eq!(snapshot.groups[0].name, "Order Management", "first occurrence wins");
+    }
+
+    use crate::docs::SnapshotWarning;
+
+    #[test]
+    fn a_note_for_a_missing_table_is_reported_as_orphaned() {
+        // The notes file describes core.orders; the schema no longer has it.
+        let mut snapshot = snapshot_with(vec![table_named("core", "customers", None)]);
+        let annotations: AnnotationFile = serde_json::from_str(SAMPLE).expect("parse");
+
+        let orphans = detect_orphans(&snapshot, &annotations, DatabaseType::Postgres);
+        assert_eq!(orphans, vec!["core.orders".to_string()]);
+
+        apply_annotations(&mut snapshot, &annotations, DatabaseType::Postgres);
+        let orphan_warnings: Vec<&SnapshotWarning> = snapshot
+            .warnings
+            .iter()
+            .filter(|warning| matches!(warning, SnapshotWarning::OrphanedNotes { .. }))
+            .collect();
+        assert_eq!(orphan_warnings.len(), 1);
+        match orphan_warnings[0] {
+            SnapshotWarning::OrphanedNotes { count } => assert_eq!(*count, 1),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_note_for_a_missing_column_is_reported_as_orphaned() {
+        // The table exists but no longer has the annotated column.
+        let mut table = table_named("core", "orders", None);
+        table.columns.push(crate::types::ColumnInfo {
+            name: "id".to_string(),
+            data_type: "integer".to_string(),
+            ..Default::default()
+        });
+        let snapshot = snapshot_with(vec![table]);
+        let annotations: AnnotationFile = serde_json::from_str(SAMPLE).expect("parse");
+
+        let orphans = detect_orphans(&snapshot, &annotations, DatabaseType::Postgres);
+        assert_eq!(orphans, vec!["core.orders.status".to_string()]);
+    }
+
+    #[test]
+    fn nothing_is_orphaned_when_everything_matches() {
+        let mut table = table_named("core", "orders", None);
+        table.columns.push(crate::types::ColumnInfo {
+            name: "status".to_string(),
+            data_type: "text".to_string(),
+            ..Default::default()
+        });
+        let mut snapshot = snapshot_with(vec![table]);
+        let annotations: AnnotationFile = serde_json::from_str(SAMPLE).expect("parse");
+
+        assert!(detect_orphans(&snapshot, &annotations, DatabaseType::Postgres).is_empty());
+
+        apply_annotations(&mut snapshot, &annotations, DatabaseType::Postgres);
+        assert!(
+            !snapshot.warnings.iter().any(|w| matches!(w, SnapshotWarning::OrphanedNotes { .. })),
+            "no orphan warning when everything matches"
+        );
+    }
+
+    #[test]
+    fn orphan_detection_never_removes_anything_from_the_file() {
+        let snapshot = snapshot_with(vec![]);
+        let annotations: AnnotationFile = serde_json::from_str(SAMPLE).expect("parse");
+        let before = annotations.tables.len();
+
+        let _ = detect_orphans(&snapshot, &annotations, DatabaseType::Postgres);
+
+        assert_eq!(annotations.tables.len(), before, "detection must not mutate the file");
     }
 }
