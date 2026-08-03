@@ -445,36 +445,48 @@ mod tests {
         assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn a_failed_save_leaves_the_previous_file_intact() {
-        // The reason for writing to a temp file and renaming. If the write
-        // fails partway, the reader must still find the last good notes —
-        // load_annotations errors loudly on malformed JSON, so a torn write
-        // would read as "your notes file is corrupt".
-        let dir = temp_case_dir("failed-save");
-        let path = dir.join("notes.json");
-        let subdir = dir.join("subdir");
-        let blocked_path = subdir.join("notes.json");
+    fn a_save_replaces_the_file_by_rename_rather_than_writing_in_place() {
+        // The whole point of temp-and-rename. A reader either sees the old
+        // file or the new one, never a half-written mix — load_annotations
+        // errors loudly on malformed JSON, so a torn write reads as "your
+        // notes file is corrupt".
+        //
+        // Writing in place keeps the inode; renaming over the target changes
+        // it. That is the difference, and it is observable without having to
+        // make a write fail halfway.
+        use std::os::unix::fs::MetadataExt;
 
-        let good = AnnotationFile {
+        let dir = temp_case_dir("atomic-replace");
+        let path = dir.join("notes.json");
+        let first = AnnotationFile {
             format_version: 1,
             project: None,
             groups: Vec::new(),
             tables: BTreeMap::from([(
-                "public.keep".to_string(),
-                TableAnnotation { group: None, note: Some("survives".into()), columns: BTreeMap::new() },
+                "public.a".to_string(),
+                TableAnnotation { group: None, note: Some("first".into()), columns: BTreeMap::new() },
             )]),
         };
-        save_annotations(&path, &good).expect("first save");
+        save_annotations(&path, &first).expect("first save");
+        let before = std::fs::metadata(&path).expect("metadata").ino();
 
-        // A directory where the target wants to be makes the rename fail.
-        std::fs::create_dir_all(&subdir).expect("create subdir");
-        std::fs::create_dir(blocked_path).expect("block the target path");
-        let result = save_annotations(&subdir.join("notes.json"), &good);
+        let second = AnnotationFile {
+            format_version: 1,
+            project: None,
+            groups: Vec::new(),
+            tables: BTreeMap::from([(
+                "public.b".to_string(),
+                TableAnnotation { group: None, note: Some("second".into()), columns: BTreeMap::new() },
+            )]),
+        };
+        save_annotations(&path, &second).expect("second save");
+        let after = std::fs::metadata(&path).expect("metadata").ino();
 
-        assert!(result.is_err(), "save must fail when the target is a directory");
+        assert_ne!(before, after, "an atomic save replaces the file by rename, never writes in place");
         let loaded = load_annotations(&path).expect("load").expect("present");
-        assert_eq!(loaded.tables["public.keep"].note.as_deref(), Some("survives"));
+        assert_eq!(loaded.tables["public.b"].note.as_deref(), Some("second"));
     }
 
     #[test]
