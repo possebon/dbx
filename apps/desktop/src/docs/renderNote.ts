@@ -2,11 +2,18 @@ import { Marked } from "marked";
 
 /** Escape the five characters that can break out of text or an attribute value. */
 function escapeHtml(value: unknown): string {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+  return (
+    String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      // Single quotes too, so the escaper is self-sufficient. Every attribute
+      // here is double-quoted today, which makes this redundant — but that is a
+      // formatting convention enforced nowhere, and the day someone writes
+      // title='...' it becomes the difference between escaping and a breakout.
+      .replace(/'/g, "&#39;")
+  );
 }
 
 /**

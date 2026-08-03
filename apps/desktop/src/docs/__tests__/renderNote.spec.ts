@@ -70,6 +70,15 @@ describe("renderNote", () => {
     expect(renderNote(`![x](${href})`)).not.toContain("evil.example.com");
   });
 
+  it("escapes single quotes so the escaper does not rely on double-quoted attributes", () => {
+    // Not exploitable while every attribute here is double-quoted, but that is
+    // a formatting convention enforced nowhere. Escaping ' keeps escapeHtml
+    // correct on its own rather than correct-given-a-distant-invariant.
+    const html = renderNote(`[x](https://example.com "it's here")`);
+    expect(html).toContain("&#39;");
+    expect(html).not.toContain("it's here");
+  });
+
   it("still allows an ordinary root-relative path", () => {
     // The // guard must not break the single-slash relative case it sits in
     // front of.
