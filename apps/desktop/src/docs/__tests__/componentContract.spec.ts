@@ -119,12 +119,18 @@ describe("docs viewer component contract", () => {
     // deleting the light block leaves the dark block's hsl satisfying it — the
     // test passes while light-theme legacy WebViews render every group
     // colourless.
+    //
+    // `.docs-ground-light` is here for the same reason as the other two, not as
+    // a third theme: GroupEditor previews a hue on a light ground whatever the
+    // app's theme, so that ground needs its own legacy-safe base. Without this
+    // entry the whole block could be deleted with the suite still green, and
+    // the preview would quietly show dark-theme colours on white in dark mode.
     const css = readFileSync(path.join(docsRoot, "docs.css"), "utf8");
     const enhanced = css.indexOf("@supports (color: oklch(1 0 0))");
     expect(enhanced).toBeGreaterThan(-1);
     const legacyBase = css.slice(0, enhanced);
 
-    for (const selector of [".docs-group", ".dark .docs-group"]) {
+    for (const selector of [".docs-group", ".dark .docs-group", ".docs-ground-light .docs-group"]) {
       // `^` with the m flag anchors to a line start, so `.docs-group` cannot
       // match inside `.dark .docs-group`, and neither matches the indented
       // copies inside the @supports block.
