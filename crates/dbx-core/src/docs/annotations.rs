@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +59,37 @@ pub struct TableAnnotation {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ColumnAnnotation {
     pub note: String,
+}
+
+/// The only format version this build understands.
+pub const ANNOTATION_FORMAT_VERSION: u32 = 1;
+
+/// Load the notes file.
+///
+/// An ABSENT file returns `Ok(None)` — that is the normal first-run and
+/// first-CI-run state. A MALFORMED file is a hard error: someone's prose is
+/// in there, and rendering apparently-complete documentation while silently
+/// discarding it is worse than failing.
+pub fn load_annotations(path: &Path) -> Result<Option<AnnotationFile>, String> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Failed to read notes file {}: {error}", path.display())),
+    };
+
+    let parsed: AnnotationFile = serde_json::from_str(&contents)
+        .map_err(|error| format!("Failed to parse notes file {}: {error}", path.display()))?;
+
+    if parsed.format_version != ANNOTATION_FORMAT_VERSION {
+        return Err(format!(
+            "Notes file {} has formatVersion {}, but this build understands {}.",
+            path.display(),
+            parsed.format_version,
+            ANNOTATION_FORMAT_VERSION
+        ));
+    }
+
+    Ok(Some(parsed))
 }
 
 #[cfg(test)]
@@ -139,5 +171,41 @@ mod tests {
         // misspelled "tabels" key would otherwise discard every note in it.
         let result: Result<AnnotationFile, _> = serde_json::from_str(r#"{"formatVersion": 1, "tabels": {}}"#);
         assert!(result.is_err(), "unknown fields must be rejected");
+    }
+
+    fn temp_notes(contents: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("dbx-notes-test-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&path, contents).expect("write temp notes file");
+        path
+    }
+
+    #[test]
+    fn an_absent_file_is_not_an_error() {
+        let missing = std::path::Path::new("/nonexistent/dbx-notes-does-not-exist.json");
+        assert!(matches!(load_annotations(missing), Ok(None)));
+    }
+
+    #[test]
+    fn a_valid_file_loads() {
+        let path = temp_notes(SAMPLE);
+        let loaded = load_annotations(&path).expect("load").expect("some");
+        assert_eq!(loaded.tables.len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_malformed_file_is_a_hard_error_naming_the_path() {
+        let path = temp_notes("{ this is not json");
+        let error = load_annotations(&path).expect_err("must fail");
+        assert!(error.contains(&path.display().to_string()), "error must name the file: {error}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_unsupported_format_version_is_rejected() {
+        let path = temp_notes(r#"{"formatVersion": 99}"#);
+        let error = load_annotations(&path).expect_err("must fail");
+        assert!(error.contains("99"), "error must name the version: {error}");
+        let _ = std::fs::remove_file(&path);
     }
 }
