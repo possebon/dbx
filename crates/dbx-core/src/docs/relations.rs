@@ -49,12 +49,14 @@ fn relationship_id(source: &DocTable, foreign_key: &ForeignKeyInfo) -> String {
 /// one is dropped rather than guessed at, because a wrong edge is worse
 /// than a missing one.
 fn find_target<'a>(tables: &'a [DocTable], source: &DocTable, foreign_key: &ForeignKeyInfo) -> Option<&'a DocTable> {
+    // An explicit ref_schema is authoritative: the database told us exactly
+    // which schema the key points at. If that schema was not collected, the
+    // edge must be DROPPED, not resolved elsewhere. Falling through would bind
+    // it to a same-named table in a different schema — `sales.orders` pointing
+    // at `archive.customers` would render as pointing at `sales.customers`,
+    // which is a confidently wrong diagram rather than an incomplete one.
     if let Some(ref_schema) = foreign_key.ref_schema.as_deref().filter(|s| !s.is_empty()) {
-        if let Some(found) =
-            tables.iter().find(|t| t.name == foreign_key.ref_table && t.schema.as_deref() == Some(ref_schema))
-        {
-            return Some(found);
-        }
+        return tables.iter().find(|t| t.name == foreign_key.ref_table && t.schema.as_deref() == Some(ref_schema));
     }
 
     if let Some(found) = tables.iter().find(|t| t.name == foreign_key.ref_table && t.schema == source.schema) {
@@ -141,6 +143,44 @@ mod tests {
             on_update: None,
             on_delete: Some("CASCADE".to_string()),
         }
+    }
+
+    fn table_in(schema: &str, name: &str, fks: Vec<ForeignKeyInfo>) -> DocTable {
+        DocTable {
+            schema: Some(schema.to_string()),
+            name: name.to_string(),
+            kind: TableKind::Table,
+            columns: vec![column("id", true), column("customer_id", false)],
+            indexes: Vec::new(),
+            foreign_keys: fks,
+            group_id: None,
+            note: None,
+            note_source: NoteSource::None,
+            shadowed_note: None,
+            column_notes: BTreeMap::new(),
+            estimated_rows: None,
+            view_definition: None,
+        }
+    }
+
+    #[test]
+    fn an_unresolvable_explicit_ref_schema_does_not_fall_back_to_another_schema() {
+        // sales.orders -> archive.customers, but only the `sales` schema was
+        // collected. `archive.customers` is absent, and `sales.customers`
+        // exists with the same bare name. Falling through to the source-schema
+        // tier would bind the edge to sales.customers — a different table than
+        // the foreign key names — and render a plausible but wrong diagram.
+        let mut fk = fk("orders_customer_fk", "customer_id", "customers", "id");
+        fk.ref_schema = Some("archive".to_string());
+
+        let tables = vec![table_in("sales", "orders", vec![fk]), table_in("sales", "customers", Vec::new())];
+
+        let relationships = build_relationships(&tables);
+        assert!(
+            relationships.is_empty(),
+            "expected the edge to be dropped, got {:?}",
+            relationships.iter().map(|r| (&r.from.table, &r.to.table)).collect::<Vec<_>>()
+        );
     }
 
     fn unique_index(name: &str, columns: &[&str]) -> IndexInfo {
