@@ -958,8 +958,21 @@ git commit -m "feat(docs): add pure annotation edit transforms"
 ## Task 6: i18n namespace and the parity guard
 
 **Files:**
-- Modify: `apps/desktop/src/docs/docsWarnings.ts` and its spec; all 8 files in `apps/desktop/src/i18n/locales/`
+- Create: `apps/desktop/src/i18n/locales/docs/{en,es,it,ja,ko,pt-BR,zh-CN,zh-TW}.ts` — the namespace, one module per locale
+- Modify: all 8 files in `apps/desktop/src/i18n/locales/` — import and spread their docs module
+- Modify: `apps/desktop/src/docs/docsWarnings.ts` and its spec
 - Create: `apps/desktop/src/i18n/__tests__/docsNamespaceParity.spec.ts`
+
+**Why the namespace gets its own modules.** Every non-English locale is
+`export default withEnglishFallback({ … })` — the fallback is applied AT MODULE LEVEL, inside the
+locale file. Only `en.ts` is a bare object. So `import ja from "../locales/ja"` yields the
+ALREADY-MERGED object, and a parity test comparing default exports would find every key present in
+every locale and pass while translations were missing. The test written to catch silent English
+fallback would be silently defeated by it.
+
+Putting the new namespace in its own per-locale modules makes each locale's OWN keys importable
+without the merge, which is the only way this property is observable at all. It is a small
+structural change scoped entirely to the new namespace; the existing 315 KB of keys are untouched.
 
 **Interfaces:**
 - Produces: `describeWarning(warning: SnapshotWarning, translate: Translate): WarningNotice` — the existing return type, unchanged — where `type Translate = (key: string, params?: Record<string, string | number>) => string`
@@ -968,19 +981,22 @@ git commit -m "feat(docs): add pure annotation edit transforms"
 
 ```ts
 import { describe, expect, it } from "vitest";
-import en from "../locales/en";
-import es from "../locales/es";
-import it_ from "../locales/it";
-import ja from "../locales/ja";
-import ko from "../locales/ko";
-import ptBR from "../locales/pt-BR";
-import zhCN from "../locales/zh-CN";
-import zhTW from "../locales/zh-TW";
+import en from "../locales/docs/en";
+import es from "../locales/docs/es";
+import it_ from "../locales/docs/it";
+import ja from "../locales/docs/ja";
+import ko from "../locales/docs/ko";
+import ptBR from "../locales/docs/pt-BR";
+import zhCN from "../locales/docs/zh-CN";
+import zhTW from "../locales/docs/zh-TW";
 
-// withEnglishFallback deep-merges `en` UNDER every locale, so a key missing
-// from ja.ts silently renders English with no error and no failing test.
-// Translation completeness is therefore unobservable at runtime — this reads
-// the RAW modules, before any merge, which is the only place the gap shows.
+// These import the per-locale DOCS modules, NOT ../locales/<name>.
+//
+// Every non-English locale file is `export default withEnglishFallback({...})`,
+// which deep-merges `en` UNDER the locale at module level. Importing those
+// default exports yields the ALREADY-MERGED object, so every locale appears to
+// have every key and this test would pass while translations were missing —
+// the fallback would silently defeat the test written to catch it.
 const locales: Array<[string, Record<string, unknown>]> = [
   ["es", es],
   ["it", it_],
@@ -1001,14 +1017,14 @@ function leafKeys(value: unknown, prefix = ""): string[] {
 }
 
 describe("docs i18n namespace parity", () => {
-  const expected = leafKeys((en as Record<string, unknown>).docs).sort();
+  const expected = leafKeys(en as Record<string, unknown>).sort();
 
   it("english declares the docs namespace", () => {
-    expect(expected.length, "en.ts must declare a docs namespace").toBeGreaterThan(0);
+    expect(expected.length, "locales/docs/en.ts must declare keys").toBeGreaterThan(0);
   });
 
   it.each(locales)("%s declares exactly the same docs keys as en", (_name, locale) => {
-    expect(leafKeys(locale.docs).sort()).toEqual(expected);
+    expect(leafKeys(locale).sort()).toEqual(expected);
   });
 });
 ```
@@ -1020,12 +1036,10 @@ pnpm vitest run apps/desktop/src/i18n/__tests__/docsNamespaceParity.spec.ts
 ```
 Expected: FAIL — no locale declares `docs`, so `leafKeys(undefined)` yields `[""]` and the English assertion fails first.
 
-- [ ] **Step 3: Add the namespace to `en.ts`**
-
-Add a `docs` key to the exported object in `apps/desktop/src/i18n/locales/en.ts`, placed alphabetically among its siblings:
+- [ ] **Step 3: Create `apps/desktop/src/i18n/locales/docs/en.ts`**
 
 ```ts
-  docs: {
+export default {
     title: "Documentation",
     groupBySchema: "Schemas",
     groupByTableGroup: "Table Groups",
@@ -1057,12 +1071,21 @@ Add a `docs` key to the exported object in `apps/desktop/src/i18n/locales/en.ts`
       orphanedNotes: "{count} note(s) refer to tables or columns that no longer exist. Nothing was deleted.",
       dbmlOmitted: "{item} on {table} was left out of the DBML: {reason}",
     },
-  },
+};
+```
+
+Then in `apps/desktop/src/i18n/locales/en.ts`, import it and spread it in alphabetical position:
+
+```ts
+import docs from "./docs/en";
+// …
+  docs,
 ```
 
 - [ ] **Step 4: Translate into the other 7 locales**
 
-Add the same key structure to `es.ts`, `it.ts`, `ja.ts`, `ko.ts`, `pt-BR.ts`, `zh-CN.ts`, `zh-TW.ts`, translating the values. Keep every interpolation placeholder (`{table}`, `{engine}`, `{count}`, `{reason}`, `{item}`, `{comment}`, `{error}`) exactly as written — a translated placeholder name renders literally.
+Create `locales/docs/{es,it,ja,ko,pt-BR,zh-CN,zh-TW}.ts` with the same key structure and translated
+values, and wire each into its locale file the same way (`import docs from "./docs/ja";` … `docs,`). Keep every interpolation placeholder (`{table}`, `{engine}`, `{count}`, `{reason}`, `{item}`, `{comment}`, `{error}`) exactly as written — a translated placeholder name renders literally.
 
 Keep technical terms in English where a developer would say them in English: for `pt-BR` that means "schema", "commit", "cache", "index" stay English while "banco de dados", "arquivo", "fila" are Portuguese.
 
@@ -1075,7 +1098,9 @@ Expected: PASS, 8 cases.
 
 - [ ] **Step 6: Verify it bites**
 
-Delete one key from the `docs` namespace in `ja.ts` and confirm the `ja` case FAILS naming that key. Restore. Report the message.
+Delete one key from `locales/docs/ja.ts` and confirm the `ja` case FAILS naming that key. Restore. Report the message.
+
+Then verify the test could not have been vacuous: temporarily point the imports at `../locales/<name>` instead of `../locales/docs/<name>`, delete a key from `locales/docs/ja.ts` again, and confirm the test now PASSES despite the missing key — that is the trap this structure exists to avoid. Restore both. Report what you saw.
 
 - [ ] **Step 7: Change `describeWarning` to take a translator**
 
