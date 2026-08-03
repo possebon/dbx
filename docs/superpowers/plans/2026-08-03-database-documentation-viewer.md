@@ -49,7 +49,7 @@
 | File | Responsibility |
 | --- | --- |
 | `apps/desktop/src/docs/types.ts` | TS interfaces mirroring the Rust `SchemaSnapshot` |
-| `apps/desktop/src/docs/fixtures/organon.snapshot.json` | Real snapshot from a live database, committed |
+| `apps/desktop/src/docs/fixtures/keycloak.snapshot.json` | Real snapshot from a live database, committed |
 | `apps/desktop/src/docs/docsIndex.ts` | Sidebar/index model: schema grouping, table-group grouping, `(no group)` bucket |
 | `apps/desktop/src/docs/docsSearch.ts` | Client-side search over tables, columns, groups, enums |
 | `apps/desktop/src/docs/docsWarnings.ts` | `SnapshotWarning` → human-readable banner text |
@@ -324,17 +324,17 @@ git commit -m "feat(docs): add snapshot types for the docs viewer"
 ## Task 2: Real fixture + drift guard
 
 **Files:**
-- Create: `apps/desktop/src/docs/fixtures/organon.snapshot.json` (generated, committed)
+- Create: `apps/desktop/src/docs/fixtures/keycloak.snapshot.json` (generated, committed)
 - Create: `apps/desktop/src/docs/__tests__/fixtureConformance.spec.ts`
 - Create: `crates/dbx-core/tests/dump_docs_fixture.rs`
 
 **This is the task that closes the drift seam.** The fixture must come from the real Rust serializer, not be hand-written — a hand-written fixture would encode the same assumptions as `types.ts` and prove nothing.
 
-**A live PostgreSQL is available:** `127.0.0.1:5432`, `postgres`/`postgres`, database `organon` (47 tables).
+**A live PostgreSQL is available:** `127.0.0.1:5432`, `postgres`/`postgres`, database `keycloak` (90 tables).
 
 - [ ] **Step 1: Write the Rust dumper**
 
-Create `crates/dbx-core/tests/dump_docs_fixture.rs`, copying the gating and setup from `crates/dbx-core/tests/live_postgres_docs_annotations.rs` (`#[tokio::test]`, `#[ignore = "..."]`, env vars with defaults, the `live_postgres_config(...)` builder). It must collect a snapshot of schema `public` from `organon`, apply a small in-memory `AnnotationFile` so that notes, a group and an orphan all appear, then write `serde_json::to_string_pretty(&snapshot)` to the path given by `DBX_FIXTURE_OUT`, defaulting to `apps/desktop/src/docs/fixtures/organon.snapshot.json` relative to the repo root.
+Create `crates/dbx-core/tests/dump_docs_fixture.rs`, copying the gating and setup from `crates/dbx-core/tests/live_postgres_docs_annotations.rs` (`#[tokio::test]`, `#[ignore = "..."]`, env vars with defaults, the `live_postgres_config(...)` builder). It must collect a snapshot of schema `public` from `keycloak`, apply a small in-memory `AnnotationFile` so that notes, a group and an orphan all appear, then write `serde_json::to_string_pretty(&snapshot)` to the path given by `DBX_FIXTURE_OUT`, defaulting to `apps/desktop/src/docs/fixtures/keycloak.snapshot.json` relative to the repo root.
 
 Include annotations covering every field the viewer must render: a table note, a column note, a group with a hue, and an annotation for a nonexistent table so an `orphanedNotes` warning is present.
 
@@ -344,15 +344,15 @@ Include annotations covering every field the viewer must render: a table note, a
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 DBX_LIVE_POSTGRES_HOST=127.0.0.1 DBX_LIVE_POSTGRES_PORT=5432 \
 DBX_LIVE_POSTGRES_USER=postgres DBX_LIVE_POSTGRES_PASSWORD=postgres \
-DBX_LIVE_POSTGRES_DATABASE=organon \
+DBX_LIVE_POSTGRES_DATABASE=keycloak \
 cargo test -p dbx-core --test dump_docs_fixture -- --ignored --nocapture
 ```
 
 Then confirm the file exists and contains real data:
 
 ```bash
-head -30 apps/desktop/src/docs/fixtures/organon.snapshot.json
-grep -c '"name"' apps/desktop/src/docs/fixtures/organon.snapshot.json
+head -30 apps/desktop/src/docs/fixtures/keycloak.snapshot.json
+grep -c '"name"' apps/desktop/src/docs/fixtures/keycloak.snapshot.json
 ```
 
 **Report the file size.** If it exceeds ~500KB, trim to the first 12 tables inside the dumper (keeping the annotated table, the group and the orphan warning) rather than committing a huge fixture.
@@ -365,7 +365,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { SchemaSnapshot } from "../types";
 
-const fixturePath = path.resolve(__dirname, "../fixtures/organon.snapshot.json");
+const fixturePath = path.resolve(__dirname, "../fixtures/keycloak.snapshot.json");
 
 function loadFixture(): SchemaSnapshot {
   return JSON.parse(readFileSync(fixturePath, "utf8")) as SchemaSnapshot;

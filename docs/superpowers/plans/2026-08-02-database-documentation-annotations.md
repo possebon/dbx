@@ -1090,7 +1090,7 @@ Follow the gating convention of `crates/dbx-core/tests/live_postgres_docs_snapsh
 
 - [ ] **Step 1: Write the live test**
 
-The test must: write a temporary notes file annotating a table that genuinely exists in `organon` plus one that does not; collect a snapshot with those annotations; then assert
+The test must: write a temporary notes file annotating a table that genuinely exists in `keycloak` plus one that does not; collect a snapshot with those annotations; then assert
 - the real table's note is present with `note_source == NoteSource::Local`,
 - an `OrphanedNotes` warning is present with `count >= 1`,
 - the generated DBML contains the note text,
@@ -1104,7 +1104,7 @@ Print the generated DBML with `println!` so `--nocapture` shows it.
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 DBX_LIVE_POSTGRES_HOST=127.0.0.1 DBX_LIVE_POSTGRES_PORT=5432 \
 DBX_LIVE_POSTGRES_USER=postgres DBX_LIVE_POSTGRES_PASSWORD=postgres \
-DBX_LIVE_POSTGRES_DATABASE=organon \
+DBX_LIVE_POSTGRES_DATABASE=keycloak \
 cargo test -p dbx-core --test live_postgres_docs_annotations -- --ignored --nocapture
 ```
 

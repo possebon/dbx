@@ -142,7 +142,17 @@ describe("fixture conformance", () => {
     pinShape("TableGroup", loadFixture().groups, ["id", "name", "hue", "note"]);
   });
 
-  it("DocEnum has exactly the keys types.ts declares", () => {
-    pinShape("DocEnum", loadFixture().enums, ["schema", "name", "values", "note", "synthesized"]);
+  it("records that the fixture source declares no enum types, leaving DocEnum unpinned", () => {
+    // Keycloak's schema has no PostgreSQL enum types, so this fixture cannot
+    // exercise DocEnum. That is a real gap: a Rust-side rename of a DocEnum
+    // field would pass every test in this file and break the viewer's enum
+    // rendering silently.
+    //
+    // Asserting the gap rather than deleting the test keeps it visible and
+    // makes it self-correcting — the day the fixture source gains an enum this
+    // fails, and the pin below should replace it:
+    //
+    //   pinShape("DocEnum", loadFixture().enums, ["schema", "name", "values", "note", "synthesized"]);
+    expect(loadFixture().enums, "fixture gained enums — restore the DocEnum pinShape here").toEqual([]);
   });
 });

@@ -89,13 +89,13 @@ async fn annotations_reach_the_generated_dbml() {
 
     const TABLE_NOTE: &str = "Every tenant's client roster. Owned by the billing team.";
     const COLUMN_NOTE: &str = "Stable natural key used by the legacy billing export.";
-    const PROJECT_NOTE: &str = "# Organon\n\nGenerated for live annotation verification.";
+    const PROJECT_NOTE: &str = "# Keycloak\n\nGenerated for live annotation verification.";
     const GROUP_NAME: &str = "Core Accounts";
 
     let notes_json = format!(
         r#"{{
   "formatVersion": 1,
-  "project": {{ "name": "Organon", "note": {project_note:?} }},
+  "project": {{ "name": "Keycloak", "note": {project_note:?} }},
   "groups": [
     {{ "id": "core-accounts", "name": {group_name:?}, "hue": 210, "note": "Tables owned by the accounts team." }}
   ],
