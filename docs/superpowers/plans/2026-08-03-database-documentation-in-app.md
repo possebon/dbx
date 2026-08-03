@@ -66,7 +66,7 @@
 
 **Interfaces:**
 - Consumes: `AnnotationFile` (existing), `ConnectionConfig` (existing, `docs_notes_path: Option<String>`)
-- Produces: `save_annotations(path: &Path, annotations: &AnnotationFile) -> Result<(), String>`, `resolve_notes_path(config: &ConnectionConfig, data_dir: &Path) -> PathBuf`
+- Produces: `save_annotations(path: &Path, annotations: &AnnotationFile) -> Result<(), String>`, `resolve_notes_path(connection_id: &str, docs_notes_path: Option<&str>, data_dir: &Path) -> PathBuf`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -75,8 +75,8 @@ Add to the existing `mod tests` in `annotations.rs`:
 ```rust
     #[test]
     fn save_then_load_round_trips() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("notes.json");
+        let dir = temp_case_dir("round-trip");
+        let path = dir.join("notes.json");
         let file = AnnotationFile {
             format_version: 1,
             project: Some(ProjectAnnotation { name: Some("P".into()), note: Some("hello".into()) }),
@@ -98,8 +98,8 @@ Add to the existing `mod tests` in `annotations.rs`:
 
     #[test]
     fn save_creates_missing_parent_directories() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("nested").join("deeper").join("notes.json");
+        let dir = temp_case_dir("nested");
+        let path = dir.join("nested").join("deeper").join("notes.json");
         let file = AnnotationFile {
             format_version: 1,
             project: None,
@@ -114,8 +114,8 @@ Add to the existing `mod tests` in `annotations.rs`:
     fn save_leaves_no_temp_file_behind() {
         // A stray notes.json.tmp would be picked up by nothing, but it means
         // the rename did not happen and the write was not atomic.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("notes.json");
+        let dir = temp_case_dir("no-temp-left");
+        let path = dir.join("notes.json");
         let file = AnnotationFile {
             format_version: 1,
             project: None,
@@ -124,7 +124,7 @@ Add to the existing `mod tests` in `annotations.rs`:
         };
         save_annotations(&path, &file).expect("save");
 
-        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
             .expect("read_dir")
             .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
@@ -139,8 +139,8 @@ Add to the existing `mod tests` in `annotations.rs`:
         // fails partway, the reader must still find the last good notes —
         // load_annotations errors loudly on malformed JSON, so a torn write
         // would read as "your notes file is corrupt".
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("notes.json");
+        let dir = temp_case_dir("failed-save");
+        let path = dir.join("notes.json");
         let good = AnnotationFile {
             format_version: 1,
             project: None,
@@ -163,16 +163,14 @@ Add to the existing `mod tests` in `annotations.rs`:
 
     #[test]
     fn an_explicit_notes_path_wins_over_the_default() {
-        let mut config = sample_config();
-        config.docs_notes_path = Some("/tmp/team/schema-notes.json".to_string());
-        let resolved = resolve_notes_path(&config, std::path::Path::new("/data"));
+        let resolved =
+            resolve_notes_path("conn-1", Some("/tmp/team/schema-notes.json"), std::path::Path::new("/data"));
         assert_eq!(resolved, std::path::PathBuf::from("/tmp/team/schema-notes.json"));
     }
 
     #[test]
     fn the_default_notes_path_is_keyed_by_connection_id() {
-        let config = sample_config();
-        let resolved = resolve_notes_path(&config, std::path::Path::new("/data"));
+        let resolved = resolve_notes_path("conn-1", None, std::path::Path::new("/data"));
         assert_eq!(resolved, std::path::PathBuf::from("/data/docs-notes/conn-1.json"));
     }
 
@@ -180,25 +178,24 @@ Add to the existing `mod tests` in `annotations.rs`:
     fn a_blank_notes_path_falls_back_to_the_default() {
         // An empty string in the config is a cleared field, not a path to a
         // file named "". Treating it as explicit would resolve to garbage.
-        let mut config = sample_config();
-        config.docs_notes_path = Some("   ".to_string());
-        let resolved = resolve_notes_path(&config, std::path::Path::new("/data"));
+        let resolved = resolve_notes_path("conn-1", Some("   "), std::path::Path::new("/data"));
         assert_eq!(resolved, std::path::PathBuf::from("/data/docs-notes/conn-1.json"));
     }
 ```
 
-Add this helper alongside them. Copy the full field list from an existing `ConnectionConfig` literal in this crate — `crates/dbx-core/tests/dump_docs_fixture.rs` has one — changing only `id` and `docs_notes_path`:
+Callers pass `&config.id, config.docs_notes_path.as_deref(), data_dir`.
+
+`dbx-core` has NO `[dev-dependencies]` section and therefore no `tempfile`. The idiom already used
+in this file (around line 319) is `std::env::temp_dir()` plus a uuid suffix — `uuid` is a regular
+dependency of this crate. Add this helper inside `mod tests` beside the others:
 
 ```rust
-    fn sample_config() -> ConnectionConfig {
-        let mut config = crate::models::connection::ConnectionConfig::default();
-        config.id = "conn-1".to_string();
-        config.docs_notes_path = None;
-        config
+    fn temp_case_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("dbx-notes-{label}-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
     }
 ```
-
-If `ConnectionConfig` has no `Default` impl, build the literal explicitly instead and say so in your report — do not add a `Default` impl to a shared model to make a test convenient.
 
 - [ ] **Step 2: Run and watch them fail**
 
@@ -248,13 +245,16 @@ pub fn save_annotations(path: &Path, annotations: &AnnotationFile) -> Result<(),
 /// be reviewed in pull requests. Otherwise the file lives under the app data
 /// directory keyed by connection id, so the feature works with no setup.
 ///
-/// `data_dir` is a parameter because `app_data_dir()` lives in `dbx-mcp`, and
-/// `dbx-core` does not depend on it.
-pub fn resolve_notes_path(config: &ConnectionConfig, data_dir: &Path) -> PathBuf {
-    if let Some(path) = config.docs_notes_path.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+/// Takes the two fields it needs rather than a whole `ConnectionConfig`:
+/// that struct has no `Default` and ~60 fields, so passing it would force
+/// every test to build a literal full of values the function never reads.
+/// `data_dir` is a parameter because `dbx-core` cannot reach the caller's
+/// data directory on its own.
+pub fn resolve_notes_path(connection_id: &str, docs_notes_path: Option<&str>, data_dir: &Path) -> PathBuf {
+    if let Some(path) = docs_notes_path.map(str::trim).filter(|value| !value.is_empty()) {
         return PathBuf::from(path);
     }
-    data_dir.join("docs-notes").join(format!("{}.json", config.id))
+    data_dir.join("docs-notes").join(format!("{connection_id}.json"))
 }
 ```
 
