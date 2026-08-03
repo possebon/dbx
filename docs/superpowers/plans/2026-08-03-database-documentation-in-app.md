@@ -1395,6 +1395,27 @@ describe("createAutosave", () => {
     vi.useRealTimers();
   });
 
+  it("never runs two saves concurrently", async () => {
+    // flush() clears the timer, but a debounced write may already be awaiting
+    // save. Starting a second one issues two concurrent writes of the same
+    // file — a wasted round trip, a stale-write race, and the exact
+    // concurrency that corrupts the notes file.
+    let concurrent = 0;
+    let maxConcurrent = 0;
+    const save = vi.fn().mockImplementation(async () => {
+      concurrent += 1;
+      maxConcurrent = Math.max(maxConcurrent, concurrent);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      concurrent -= 1;
+    });
+
+    const autosave = createAutosave(save, 0);
+    autosave.schedule(file);
+    await Promise.all([autosave.flush(), autosave.flush(), autosave.flush()]);
+
+    expect(maxConcurrent).toBe(1);
+  });
+
   it("flush writes immediately without waiting for the timer", async () => {
     // The dialog calls this on close, so a note typed a moment earlier is
     // not lost to a pending debounce.
@@ -1443,19 +1464,46 @@ export function createAutosave(save: (file: AnnotationFile) => Promise<void>, de
   const status = ref<SaveStatus>({ state: "idle" });
   let timer: ReturnType<typeof setTimeout> | undefined;
   let pending: AnnotationFile | undefined;
+  // The write currently in flight, if any. `flush()` clearing the timer is not
+  // enough: a debounced write may already be awaiting `save`, and starting a
+  // second one issues two concurrent saves of the same file. Beyond wasting a
+  // round trip, the later one can land stale, and it is the exact concurrency
+  // that corrupted the notes file before the Rust side used a unique temp path.
+  let inFlight: Promise<void> | undefined;
 
   async function write(): Promise<void> {
+    if (inFlight !== undefined) {
+      // Wait for the current write, then run again if an edit arrived while it
+      // was going — never two at once.
+      await inFlight;
+      if (pending === undefined) {
+        return;
+      }
+    }
     if (pending === undefined) {
       return;
     }
     const file = pending;
     status.value = { state: "saving" };
+    const attempt = (async () => {
+      try {
+        await save(file);
+        // Only clear if no newer edit arrived while this was in flight.
+        if (pending === file) {
+          pending = undefined;
+        }
+        status.value = { state: "saved" };
+      } catch (error) {
+        status.value = { state: "failed", message: error instanceof Error ? error.message : String(error) };
+      }
+    })();
+    inFlight = attempt;
     try {
-      await save(file);
-      pending = undefined;
-      status.value = { state: "saved" };
-    } catch (error) {
-      status.value = { state: "failed", message: error instanceof Error ? error.message : String(error) };
+      await attempt;
+    } finally {
+      if (inFlight === attempt) {
+        inFlight = undefined;
+      }
     }
   }
 
@@ -1491,9 +1539,12 @@ On an `edit` event from `DocsApp`: apply the matching `annotationEdits` function
 
 Add `docsSource` to `connectionStore` mirroring `diagramSource`. Add a watcher in `useDialogSources.ts` beside the diagram one (~line 162) setting `showDocsDialog` and the prefills. Register in `AppDialogs.vue` with `defineAsyncComponent` and `v-if` + `v-model:open`, matching `SchemaDiagramDialog`'s shape. Add the menu entry that sets `docsSource`.
 
-- [ ] **Step 7: Verify the failure path bites**
+- [ ] **Step 7: Verify two guards bite**
 
-Make `save` in `createAutosave` swallow its error (`catch { pending = undefined; }`) and confirm `surfaces a failure instead of swallowing it` FAILS. Restore. Report the message.
+One at a time, restoring between each. Report both failure messages.
+
+1. Make the `catch` in `write()` swallow its error (`catch { pending = undefined; }`) → `surfaces a failure instead of swallowing it` must fail.
+2. Delete the `inFlight` guard at the top of `write()` → `never runs two saves concurrently` must fail.
 
 - [ ] **Step 8: Full verification and commit**
 
