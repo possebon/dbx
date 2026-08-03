@@ -1143,3 +1143,76 @@ git commit -m "test(docs): verify annotations against a live database"
 - The docs viewer, in-app editing dialog, group colour picker, and HTML export.
 - Rename suggestions for orphaned notes (needs snapshot history — spec Section 12).
 - Writing the notes file from DBX (Part 2 only reads it; the file is hand-edited or repo-managed).
+
+---
+
+## Appendix: Corrections found during execution
+
+Defects in this plan's own text, found while executing it. Grouped by failure mode rather than by
+task, because the modes repeat and the tasks do not. Every one originated in the plan; none was an
+implementer error. The companion plan for the viewer carries its own appendix in the same form.
+
+### Mode A — compiles, passes its own test, and is silently wrong forever
+
+The most dangerous defect found anywhere in this feature, and the only one that would have shipped
+undetected.
+
+- **Task 7, `docs_notes_path`.** The plan added the field to `ConnectionConfig` and to its own
+  test, which passed. But `ConnectionConfig` is not what deserialization reads — a mirror struct,
+  `ConnectionConfigData`, carries the serde attributes, and a `From` impl copies fields across.
+  Adding the field in one place compiles cleanly, satisfies a round-trip test written against the
+  same struct, and then reads `None` forever after every load, because nothing ever populates it.
+  Caught by pre-resolution, not by review: the field had to be added in **three** places, and only
+  reading the deserialization path revealed the third.
+
+**The lesson:** when a struct has a serde mirror, "it compiles and the test passes" is evidence
+about the wrong object. Follow the value from the file on disk to the field being read.
+
+### Mode B — an assertion too weak to detect the failure it names
+
+Same failure mode as Mode 1 in the viewer plan's appendix, and the most common across both.
+
+- **Task 1, `round_trips_through_json`.** Asserted only `tables.len()` and a single group name. A
+  serializer that silently dropped every note, hue, and column annotation would pass it. Fixed by
+  asserting the full round-tripped structure.
+- **Task 5.** Each headline test individually survived a mutant; only the *pair* caught it.
+  Accepted rather than fixed, but recorded, because a later edit that deletes one test would
+  silently remove the coverage the other depends on.
+
+### Mode C — plan text written from memory instead of from the code
+
+Four instances, all caught before dispatch by reading the actual source. None would have survived
+compilation, so the cost was implementer time rather than correctness — but that cost is real.
+
+- `DatabaseType::Mysql`, which the plan spelled `MySQL`.
+- A borrow hazard in a code block the plan supplied verbatim (Task 4).
+- `let mut snapshot = snapshot;` in the `run_dbml` shape, which was a guess at the real signature.
+- `capabilities_for` is `pub(super)`, not `pub`, and `AppState`'s module path was wrong.
+
+**The lesson:** every identifier a plan names is a claim about the codebase. Checking them costs
+minutes; a dispatch that fails on one costs an implementer round-trip.
+
+### Mode D — matching logic that attaches data to the wrong object
+
+- **Task 2, identifier folding.** The original key-matching rule could fold two genuinely distinct
+  identifiers to the same key, so a note written for one table would attach to another. The doc
+  comment's stated MySQL rationale also described behaviour the code did not implement. Fixed by
+  making `fold_identifier` engine-specific (Oracle uppercases, ClickHouse and MongoDB preserve,
+  everything else lowercases) and correcting the comment to match.
+
+A related seam was investigated and cleared: Oracle folding is used **only** for matching, never
+for output — the serializer emits the collector's reported name verbatim, so folding cannot corrupt
+what is written.
+
+### Mode E — a test helper that is itself flaky
+
+- **Task 3.** The plan's own test helper had a race that would produce intermittent failures.
+  Caught before dispatch. A flaky test in a new suite is worse than no test: it trains the reader
+  to re-run rather than to read.
+
+### A controller hypothesis that was wrong
+
+Recorded because being wrong in this direction is cheap and worth doing more often. I suspected a
+second `apply_annotations` call would overwrite `shadowed_note` with the first local note and lose
+the database comment. Tracing it showed the guard simply does not fire on the second call, so
+`shadowed_note` keeps its first-call value. No defect existed. The check cost one read.
