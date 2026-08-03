@@ -175,7 +175,7 @@ async fn annotations_reach_the_generated_dbml() {
             _ => None,
         })
         .expect("an OrphanedNotes warning must be present for the no_such_table_xyz annotation");
-    assert!(orphan_count >= 1, "expected at least one orphaned note, got {orphan_count}");
+    assert_eq!(orphan_count, 1, "exactly one annotation targets a nonexistent table");
 
     let dbml = dbx_core::docs::to_dbml(&snapshot);
     println!("{}", dbml.text);
