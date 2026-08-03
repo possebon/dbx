@@ -107,6 +107,19 @@ pub fn load_annotations(path: &Path) -> Result<Option<AnnotationFile>, String> {
     Ok(Some(parsed))
 }
 
+/// A unique sibling temp path for an atomic save.
+///
+/// MUST be unique per call: a temp name derived from the target alone is
+/// shared by every concurrent writer, so two saves interleave their bytes into
+/// one file and the last rename publishes the mixture. MUST also be a sibling
+/// — rename is only atomic within a filesystem, and a temp file elsewhere
+/// could land on a different mount.
+fn temp_save_path(path: &Path) -> PathBuf {
+    let name = path.file_name().map(|value| value.to_string_lossy().into_owned()).unwrap_or_default();
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    path.with_file_name(format!(".{name}.{}.tmp", &unique[..8]))
+}
+
 /// Write the notes file atomically.
 ///
 /// A partial write destroys prose a human typed, and `load_annotations`
@@ -122,15 +135,24 @@ pub fn save_annotations(path: &Path, annotations: &AnnotationFile) -> Result<(),
         std::fs::create_dir_all(parent).map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
     }
 
-    let temp = path.with_extension("json.tmp");
+    let temp = temp_save_path(path);
     {
         let mut file =
             std::fs::File::create(&temp).map_err(|error| format!("Failed to create {}: {error}", temp.display()))?;
-        file.write_all(json.as_bytes()).map_err(|error| format!("Failed to write {}: {error}", temp.display()))?;
-        file.sync_all().map_err(|error| format!("Failed to flush {}: {error}", temp.display()))?;
+        file.write_all(json.as_bytes()).map_err(|error| {
+            let _ = std::fs::remove_file(&temp);
+            format!("Failed to write {}: {error}", temp.display())
+        })?;
+        file.sync_all().map_err(|error| {
+            let _ = std::fs::remove_file(&temp);
+            format!("Failed to flush {}: {error}", temp.display())
+        })?;
     }
 
-    std::fs::rename(&temp, path).map_err(|error| format!("Failed to replace {}: {error}", path.display()))
+    std::fs::rename(&temp, path).map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        format!("Failed to replace {}: {error}", path.display())
+    })
 }
 
 /// Where a connection's notes file lives.
@@ -431,6 +453,9 @@ mod tests {
         // would read as "your notes file is corrupt".
         let dir = temp_case_dir("failed-save");
         let path = dir.join("notes.json");
+        let subdir = dir.join("subdir");
+        let blocked_path = subdir.join("notes.json");
+
         let good = AnnotationFile {
             format_version: 1,
             project: None,
@@ -442,11 +467,12 @@ mod tests {
         };
         save_annotations(&path, &good).expect("first save");
 
-        // A directory where the temp file wants to be makes File::create fail.
-        std::fs::create_dir(path.with_extension("json.tmp")).expect("block the temp path");
-        let result = save_annotations(&path, &good);
+        // A directory where the target wants to be makes the rename fail.
+        std::fs::create_dir_all(&subdir).expect("create subdir");
+        std::fs::create_dir(blocked_path).expect("block the target path");
+        let result = save_annotations(&subdir.join("notes.json"), &good);
 
-        assert!(result.is_err(), "save must fail when the temp path is unusable");
+        assert!(result.is_err(), "save must fail when the target is a directory");
         let loaded = load_annotations(&path).expect("load").expect("present");
         assert_eq!(loaded.tables["public.keep"].note.as_deref(), Some("survives"));
     }
@@ -469,6 +495,48 @@ mod tests {
         // file named "". Treating it as explicit would resolve to garbage.
         let resolved = resolve_notes_path("conn-1", Some("   "), std::path::Path::new("/data"));
         assert_eq!(resolved, std::path::PathBuf::from("/data/docs-notes/conn-1.json"));
+    }
+
+    #[test]
+    fn each_save_uses_a_distinct_temp_path() {
+        // A temp name derived from the target alone is shared by every
+        // concurrent writer, so two saves interleave into one file and the
+        // last rename publishes the mixture.
+        let target = std::path::Path::new("/data/docs-notes/conn-1.json");
+        let first = temp_save_path(target);
+        let second = temp_save_path(target);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn the_temp_path_is_a_sibling_of_the_target() {
+        // rename is only atomic within one filesystem. A temp file in /tmp
+        // could be on a different mount, making the rename a copy.
+        let target = std::path::Path::new("/data/docs-notes/conn-1.json");
+        assert_eq!(temp_save_path(target).parent(), target.parent());
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temp_file_in_the_target_directory() {
+        // docs_notes_path is meant to point into a user's repository, so
+        // debris from a failed save shows up in their git status.
+        let dir = temp_case_dir("failed-write-debris");
+        let path = dir.join("notes.json");
+        // A directory at the target makes the rename fail after the temp file
+        // has been written.
+        std::fs::create_dir(&path).expect("block the target path");
+        let file = AnnotationFile { format_version: 1, project: None, groups: Vec::new(), tables: BTreeMap::new() };
+
+        let result = save_annotations(&path, &file);
+        assert!(result.is_err(), "save must fail when the target is a directory");
+
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
     }
 
     #[test]
