@@ -216,6 +216,7 @@ mod tests {
         let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let mut cfg = crate::models::connection::ConnectionConfig {
+            docs_notes_path: None,
             id: "nacos-1".to_string(),
             name: "Nacos".to_string(),
             note: String::new(),
@@ -288,6 +289,7 @@ mod tests {
         let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let cfg = crate::models::connection::ConnectionConfig {
+            docs_notes_path: None,
             id: "nacos-rollback".to_string(),
             name: "Nacos".to_string(),
             note: String::new(),

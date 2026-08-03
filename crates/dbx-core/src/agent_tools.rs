@@ -1036,6 +1036,7 @@ for line in sys.stdin:
     #[cfg(unix)]
     fn dameng_test_connection() -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "dameng-1".to_string(),
             name: "Dameng".to_string(),
             note: String::new(),

@@ -112,6 +112,7 @@ mod tests {
 
     fn connection_with_external(value: serde_json::Value) -> ConnectionConfig {
         let mut cfg = ConnectionConfig {
+            docs_notes_path: None,
             id: "c1".to_string(),
             name: "mq".to_string(),
             note: String::new(),
