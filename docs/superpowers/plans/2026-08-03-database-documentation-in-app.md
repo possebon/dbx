@@ -1642,6 +1642,56 @@ export function createAutosave(save: (file: AnnotationFile) => Promise<void>, de
 
 - [ ] **Step 5: Build the dialog**
 
+**The dialog shell, matching `SchemaDiagramDialog.vue` — the closest comparable feature:**
+
+```vue
+<script setup lang="ts">
+import { computed, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import DocsApp from "@/docs/DocsApp.vue";
+
+const props = defineProps<{
+  open: boolean;
+  prefillConnectionId: string;
+  prefillDatabase: string;
+  prefillSchema?: string;
+}>();
+
+const emit = defineEmits<{ "update:open": [value: boolean] }>();
+
+// The get/set computed is how every dialog in this codebase bridges the
+// `open` prop to `v-model:open` on <Dialog>.
+const dialogOpen = computed({
+  get: () => props.open,
+  set: (value) => emit("update:open", value),
+});
+
+// This component lives OUTSIDE src/docs/, so it may and must use useI18n():
+// it is what supplies the `translate` prop that the viewer components need,
+// since they are banned from importing vue-i18n themselves.
+const { t } = useI18n();
+</script>
+
+<template>
+  <Dialog v-model:open="dialogOpen">
+    <DialogContent
+      class="w-[94vw] max-w-[94vw] sm:max-w-[94vw] md:max-w-[94vw] lg:max-w-[94vw] xl:max-w-[94vw] h-[86vh] max-h-[86vh] gap-0 p-0 overflow-hidden flex flex-col"
+    >
+      <DialogHeader>
+        <DialogTitle>{{ t("docs.title") }}</DialogTitle>
+      </DialogHeader>
+      <!-- snapshot / annotations / translate / readonly=false down, `edit` up -->
+    </DialogContent>
+  </Dialog>
+</template>
+```
+
+The sizing class is copied verbatim from `SchemaDiagramDialog.vue:827`. The docs viewer is the same
+kind of thing — a full-window workspace rather than a form — so it should not invent its own
+dimensions.
+
+
 `DatabaseDocsDialog.vue` — props `open`, `prefillConnectionId`, `prefillDatabase`, `prefillSchema`. On open: `collectDocsSnapshot(...)` for the raw snapshot, `loadDocsAnnotations(...)` for the file (falling back to `emptyAnnotations()` when null), then `applyDocsAnnotations(...)` for what it displays. Holds the raw snapshot for re-derivation.
 
 On an `edit` event from `DocsApp`: apply the matching `annotationEdits` function, `schedule` the autosave, and call `applyDocsAnnotations` to refresh the display. Show the save status. Call `flush()` before closing. Use `useI18n()` HERE — the dialog is outside `src/docs/` — and pass `t` down as the `translate` prop. Add a button opening the existing schema diagram via `connectionStore.diagramSource`.
