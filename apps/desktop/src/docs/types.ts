@@ -134,3 +134,64 @@ export interface SchemaSnapshot {
   enums: DocEnum[];
   warnings: SnapshotWarning[];
 }
+
+/** Mirrors `dbx_core::docs::annotations::ColumnAnnotation`. */
+export interface ColumnAnnotation {
+  note: string;
+}
+
+/** Mirrors `TableAnnotation`. Absent keys are omitted, never sent as null. */
+export interface TableAnnotation {
+  group?: string;
+  note?: string;
+  columns?: Record<string, ColumnAnnotation>;
+}
+
+/** Mirrors `GroupAnnotation`. `hue` is 0–359; lightness and chroma are the theme's. */
+export interface GroupAnnotation {
+  id: string;
+  name: string;
+  hue: number;
+  note?: string;
+}
+
+/** Mirrors `ProjectAnnotation`. */
+export interface ProjectAnnotation {
+  name?: string;
+  note?: string;
+}
+
+/**
+ * The on-disk notes file. Rust declares `deny_unknown_fields`, so adding a
+ * property here without adding it in Rust makes every save fail.
+ */
+export interface AnnotationFile {
+  formatVersion: number;
+  project?: ProjectAnnotation;
+  groups?: GroupAnnotation[];
+  tables?: Record<string, TableAnnotation>;
+}
+
+/**
+ * Runtime witnesses for the interfaces above.
+ *
+ * TypeScript types are erased at runtime, so a test cannot enumerate an
+ * interface's keys. `Record<keyof T, true>` gives a value that IS enumerable
+ * and that `vue-tsc` checks against the interface: add a field and this object
+ * is missing a key; remove one and it carries an excess property. Either way
+ * the build fails here rather than at a user's save.
+ *
+ * These live in this file, not in the spec, because `tsconfig.json` excludes
+ * `src/**\/__tests__/**` from `vue-tsc` — witnesses in a spec file would be
+ * checked by nothing.
+ */
+export const COLUMN_ANNOTATION_KEYS: Record<keyof ColumnAnnotation, true> = { note: true };
+export const TABLE_ANNOTATION_KEYS: Record<keyof TableAnnotation, true> = { group: true, note: true, columns: true };
+export const GROUP_ANNOTATION_KEYS: Record<keyof GroupAnnotation, true> = { id: true, name: true, hue: true, note: true };
+export const PROJECT_ANNOTATION_KEYS: Record<keyof ProjectAnnotation, true> = { name: true, note: true };
+export const ANNOTATION_FILE_KEYS: Record<keyof AnnotationFile, true> = {
+  formatVersion: true,
+  project: true,
+  groups: true,
+  tables: true,
+};
