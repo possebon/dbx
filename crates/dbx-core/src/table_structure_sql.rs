@@ -37,16 +37,27 @@ pub fn build_table_structure_change_sql(options: TableStructureSqlOptions) -> Ta
     TableStructureSqlResult { statements, warnings }
 }
 
-/// Whether this engine supports COMMENT ON for tables and columns. The
-/// documentation collector uses this to warn when DBX's own annotation
-/// layer is the only possible source of prose.
+/// Whether this engine's structure editor can generate `COMMENT ON`/inline
+/// comment DDL for tables and columns — a DDL-generation capability, not an
+/// introspection one. The documentation collector uses it as a heuristic for
+/// "can this engine report comments at all", but the two questions can
+/// diverge: IRIS supports `%DESCRIPTION` while *defining* a table or column,
+/// but DBX's editor cannot ALTER an existing one, so this returns `false`
+/// for IRIS even though IRIS still reports descriptions on introspection.
+/// Callers using this as an introspection signal must corroborate it against
+/// what was actually collected rather than trust the flag alone.
 pub(crate) fn supports_comments(database_type: crate::models::connection::DatabaseType) -> bool {
     dialect::capabilities_for(Some(database_type)).comment
 }
 
-/// Whether this engine reports foreign key metadata at all. Engines like
-/// ClickHouse and Doris do not, so their ER diagrams have no edges by
-/// necessity rather than by accident.
+/// Whether this engine's structure editor can generate foreign key DDL — a
+/// DDL-generation capability, not an introspection one, used here as a
+/// heuristic for "does this engine report foreign key metadata at all".
+/// Engines like ClickHouse and Doris genuinely report none, so their ER
+/// diagrams have no edges by necessity rather than by accident, but a
+/// mismatch analogous to the IRIS comment case is possible for any future
+/// engine where DDL support and introspection support diverge — callers
+/// should corroborate against what was actually collected.
 pub(crate) fn supports_foreign_keys(database_type: crate::models::connection::DatabaseType) -> bool {
     dialect::capabilities_for(Some(database_type)).foreign_key
 }

@@ -6,7 +6,8 @@ use futures::stream::{self, StreamExt};
 use crate::connection::AppState;
 use crate::docs::dbml::{enum_type_name, is_inline_enum_spelling};
 use crate::docs::{
-    build_relationships, DocEnum, DocTable, NoteSource, ProjectMeta, SchemaSnapshot, SnapshotWarning, TableKind,
+    build_relationships, DocEnum, DocTable, NoteSource, ProjectMeta, Relationship, SchemaSnapshot, SnapshotWarning,
+    TableKind,
 };
 use crate::models::connection::ConnectionConfig;
 use crate::schema;
@@ -92,6 +93,33 @@ fn cancelled(cancel: &AtomicBool) -> bool {
     cancel.load(Ordering::Relaxed)
 }
 
+/// Whether any table or column in the collected snapshot carries a
+/// non-empty comment. Used to corroborate `supports_comments` — a DDL-only
+/// capability flag — against what introspection actually returned.
+fn any_comment_collected(tables: &[DocTable]) -> bool {
+    tables.iter().any(|table| {
+        table.note.as_deref().is_some_and(|note| !note.trim().is_empty())
+            || table
+                .columns
+                .iter()
+                .any(|column| column.comment.as_deref().is_some_and(|comment| !comment.trim().is_empty()))
+    })
+}
+
+/// True when the `CommentsUnsupported` warning belongs in the snapshot: the
+/// engine's DDL capability flag says it can't do comments, and collection
+/// found none to contradict it.
+fn should_warn_comments_unsupported(supports_comments: bool, tables: &[DocTable]) -> bool {
+    !supports_comments && !any_comment_collected(tables)
+}
+
+/// True when the `NoForeignKeyMetadata` warning belongs in the snapshot: the
+/// engine's DDL capability flag says it can't do foreign keys, and
+/// collection found no relationships to contradict it.
+fn should_warn_no_foreign_key_metadata(supports_foreign_keys: bool, relationships: &[Relationship]) -> bool {
+    !supports_foreign_keys && relationships.is_empty()
+}
+
 /// Collect a documentation snapshot.
 ///
 /// A per-table failure is recorded as a `TableSkipped` warning and does not
@@ -107,13 +135,6 @@ pub async fn collect_snapshot(
     let mut warnings: Vec<SnapshotWarning> = Vec::new();
     let engine = database_type_label(connection.db_type);
     let connection_id = connection.id.as_str();
-
-    if !supports_comments(connection.db_type) {
-        warnings.push(SnapshotWarning::CommentsUnsupported { engine: engine.clone() });
-    }
-    if !supports_foreign_keys(connection.db_type) {
-        warnings.push(SnapshotWarning::NoForeignKeyMetadata { engine: engine.clone() });
-    }
 
     let schemas = if options.schemas.is_empty() {
         match schema::list_schemas_core(state, connection_id, &options.database).await {
@@ -278,6 +299,19 @@ pub async fn collect_snapshot(
 
     let relationships = build_relationships(&tables);
 
+    // The capability flags gate DDL generation (COMMENT ON, foreign key
+    // clauses), not introspection — IRIS is the proven divergence: it
+    // reports comments on introspection despite the editor being unable to
+    // ALTER them, so `supports_comments` alone would be a false positive. A
+    // warning fires only when the flag says an engine can't AND collection
+    // corroborates that nothing of the kind actually came back.
+    if should_warn_comments_unsupported(supports_comments(connection.db_type), &tables) {
+        warnings.push(SnapshotWarning::CommentsUnsupported { engine: engine.clone() });
+    }
+    if should_warn_no_foreign_key_metadata(supports_foreign_keys(connection.db_type), &relationships) {
+        warnings.push(SnapshotWarning::NoForeignKeyMetadata { engine: engine.clone() });
+    }
+
     progress(CollectProgress { completed: total, total, current: String::new() });
 
     Ok(SchemaSnapshot {
@@ -431,9 +465,85 @@ mod tests {
     }
 
     #[test]
-    fn foreign_key_warning_depends_on_engine_capability_not_on_relationship_count() {
-        // A capable engine must NOT be reported as lacking FK metadata just
-        // because the schema happens to have no relationships.
+    fn postgres_reports_foreign_key_ddl_capability_true() {
         assert!(supports_foreign_keys(crate::models::connection::DatabaseType::Postgres));
+    }
+
+    fn column_with_comment(comment: &str) -> crate::types::ColumnInfo {
+        crate::types::ColumnInfo {
+            name: "notes".to_string(),
+            data_type: "text".to_string(),
+            comment: Some(comment.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn sample_relationship() -> Relationship {
+        Relationship {
+            id: "orders.customer_id->customers.id".to_string(),
+            name: None,
+            from: crate::docs::FieldRef {
+                schema: Some("public".to_string()),
+                table: "orders".to_string(),
+                column: "customer_id".to_string(),
+            },
+            to: crate::docs::FieldRef {
+                schema: Some("public".to_string()),
+                table: "customers".to_string(),
+                column: "id".to_string(),
+            },
+            cardinality: crate::docs::Cardinality::ManyToOne,
+            on_update: None,
+            on_delete: None,
+        }
+    }
+
+    #[test]
+    fn comments_unsupported_warning_fires_when_flag_is_false_and_nothing_was_collected() {
+        let tables = vec![table_with_columns("public", "orders", vec![])];
+        assert!(should_warn_comments_unsupported(false, &tables));
+    }
+
+    #[test]
+    fn comments_unsupported_warning_is_absent_when_a_table_comment_was_collected() {
+        // Regression: IRIS reports `comment: false` on the DDL capability
+        // flag (it supports %DESCRIPTION at CREATE time but DBX cannot ALTER
+        // it), yet IRIS still returns real comments on introspection. The
+        // warning must not contradict data actually present in the snapshot.
+        let mut table = table_with_columns("public", "orders", vec![]);
+        table.note = Some("Checkout rows.".to_string());
+        assert!(!should_warn_comments_unsupported(false, &[table]));
+    }
+
+    #[test]
+    fn comments_unsupported_warning_is_absent_when_a_column_comment_was_collected() {
+        let tables = vec![table_with_columns("public", "orders", vec![column_with_comment("Internal notes.")])];
+        assert!(!should_warn_comments_unsupported(false, &tables));
+    }
+
+    #[test]
+    fn comments_unsupported_warning_does_not_fire_when_the_capability_flag_is_true() {
+        let tables = vec![table_with_columns("public", "orders", vec![])];
+        assert!(!should_warn_comments_unsupported(true, &tables));
+    }
+
+    #[test]
+    fn no_foreign_key_warning_fires_when_flag_is_false_and_no_relationships_were_collected() {
+        assert!(should_warn_no_foreign_key_metadata(false, &[]));
+    }
+
+    #[test]
+    fn no_foreign_key_warning_is_absent_when_relationships_were_collected() {
+        // Regression: ClickHouse/Doris genuinely report zero FK metadata, so
+        // this must still fire for them — but an engine that DOES report
+        // relationships must not be flagged just because its DDL capability
+        // flag is false.
+        let relationships = vec![sample_relationship()];
+        assert!(!should_warn_no_foreign_key_metadata(false, &relationships));
+    }
+
+    #[test]
+    fn no_foreign_key_warning_does_not_fire_when_the_capability_flag_is_true() {
+        assert!(!should_warn_no_foreign_key_metadata(true, &[]));
     }
 }
