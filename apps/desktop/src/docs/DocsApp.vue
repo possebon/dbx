@@ -5,6 +5,7 @@ import DocsSidebar from "./components/DocsSidebar.vue";
 import EnumPage from "./components/EnumPage.vue";
 import GroupEditor from "./components/GroupEditor.vue";
 import NoteEditor from "./components/NoteEditor.vue";
+import SchemaDiagram from "./components/SchemaDiagram.vue";
 import TablePage from "./components/TablePage.vue";
 import WarningBanner from "./components/WarningBanner.vue";
 import WikiIndex from "./components/WikiIndex.vue";
@@ -60,9 +61,11 @@ const mode = ref<"schema" | "group">(props.snapshot.groups.length > 0 ? "group" 
 // declines to apply an `update:route`.
 const internalKey = ref<string | null>(null);
 const internalEnumName = ref<string | null>(null);
+const internalDiagram = ref(false);
 
 const effectiveRoute = computed<DocsRoute>(() => {
   if (props.route) return props.route;
+  if (internalDiagram.value) return { kind: "diagram" };
   if (internalEnumName.value !== null) return { kind: "enum", name: internalEnumName.value };
   if (internalKey.value !== null) return { kind: "table", key: internalKey.value };
   return { kind: "index" };
@@ -82,7 +85,10 @@ const activeTable = computed(() => props.snapshot.tables.find((table) => qualifi
  */
 const activeEnum = computed(() => (activeEnumName.value === null ? null : (props.snapshot.enums.find((value) => value.name === activeEnumName.value) ?? null)));
 
-const view = computed<"index" | "table" | "enum">(() => {
+const view = computed<"index" | "table" | "enum" | "diagram">(() => {
+  if (effectiveRoute.value.kind === "diagram") {
+    return "diagram";
+  }
   if (activeEnum.value !== null) {
     return "enum";
   }
@@ -102,6 +108,7 @@ function open(key: string): void {
   // dropping them on a blank page.
   if (props.snapshot.tables.some((table) => qualifiedTableKey(table) === key)) {
     internalEnumName.value = null;
+    internalDiagram.value = false;
     internalKey.value = key;
     emit("update:route", { kind: "table", key });
   }
@@ -110,14 +117,23 @@ function open(key: string): void {
 function openEnum(name: string): void {
   if (props.snapshot.enums.some((value) => value.name === name)) {
     internalKey.value = null;
+    internalDiagram.value = false;
     internalEnumName.value = name;
     emit("update:route", { kind: "enum", name });
   }
 }
 
+function openDiagram(): void {
+  internalKey.value = null;
+  internalEnumName.value = null;
+  internalDiagram.value = true;
+  emit("update:route", { kind: "diagram" });
+}
+
 function home(): void {
   internalKey.value = null;
   internalEnumName.value = null;
+  internalDiagram.value = false;
   emit("update:route", { kind: "index" });
 }
 
@@ -141,7 +157,18 @@ function createGroupFor(tableKey: string): void {
 
 <template>
   <div class="flex h-full min-h-0 bg-background text-foreground">
-    <DocsSidebar :sections="sections" :mode="mode" :active-key="activeKey" :translate="translate" @update:mode="mode = $event" @select="open" @home="home()" />
+    <div class="flex h-full min-h-0 w-64 shrink-0 flex-col">
+      <DocsSidebar class="min-h-0 flex-1" :sections="sections" :mode="mode" :active-key="activeKey" :translate="translate" @update:mode="mode = $event" @select="open" @home="home()" />
+      <button
+        v-if="diagram === 'inline'"
+        type="button"
+        class="shrink-0 border-t border-r border-border bg-background px-3 py-2 text-left text-xs font-medium transition-colors"
+        :class="view === 'diagram' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:bg-muted/40'"
+        @click="openDiagram()"
+      >
+        {{ translate("docs.diagram") }}
+      </button>
+    </div>
 
     <main class="flex min-w-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
       <header class="flex flex-wrap items-start justify-between gap-3">
@@ -180,6 +207,8 @@ function createGroupFor(tableKey: string): void {
       />
 
       <EnumPage v-else-if="activeEnum" :enum-type="activeEnum" :snapshot="snapshot" :translate="translate" @select="open" />
+
+      <SchemaDiagram v-else-if="view === 'diagram'" :snapshot="snapshot" :translate="translate" @select="open" />
     </main>
   </div>
 </template>

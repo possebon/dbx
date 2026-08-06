@@ -64,7 +64,7 @@ function domTextOf(file: string): { staticText: string; interpolations: string[]
   return { staticText: segments.join(" "), interpolations };
 }
 
-const EXPECTED = ["ColumnTable.vue", "DocsApp.vue", "DocsSearch.vue", "DocsSidebar.vue", "EnumPage.vue", "GroupEditor.vue", "GroupPicker.vue", "NoteEditor.vue", "RelationshipList.vue", "TablePage.vue", "WarningBanner.vue", "WikiIndex.vue"];
+const EXPECTED = ["ColumnTable.vue", "DocsApp.vue", "DocsSearch.vue", "DocsSidebar.vue", "EnumPage.vue", "GroupEditor.vue", "GroupPicker.vue", "NoteEditor.vue", "RelationshipList.vue", "SchemaDiagram.vue", "TablePage.vue", "WarningBanner.vue", "WikiIndex.vue"];
 
 describe("docs viewer component contract", () => {
   it("finds every expected component", () => {
