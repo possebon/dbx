@@ -154,4 +154,34 @@ describe("docs viewer component contract", () => {
       expect(block, `${selector} must define --group-tint without oklch`).toContain("--group-tint: hsl(");
     }
   });
+
+  it("renders no English literal that already has a key", async () => {
+    // Derived from the namespace, NOT an enumerated list of strings. A key
+    // added tomorrow is covered tomorrow. This is the guard Part 3b lacked:
+    // docsNamespaceParity compares locale files to EACH OTHER, so a key that
+    // no component ever calls passes every existing test.
+    const en = (await import("../../i18n/locales/docs/en")).default as Record<string, unknown>;
+    const literals: string[] = [];
+    const walk = (node: unknown) => {
+      if (typeof node === "string") {
+        // Skip short strings (false positives on words like "LOCAL") and any
+        // string carrying a placeholder, which cannot appear verbatim anyway.
+        if (node.length >= 4 && !node.includes("{")) literals.push(node);
+        return;
+      }
+      if (node && typeof node === "object") Object.values(node).forEach(walk);
+    };
+    walk(en);
+    expect(literals.length).toBeGreaterThan(10);
+
+    const files = vueFiles();
+    expect(files.length).toBe(EXPECTED.length);
+    for (const file of files) {
+      const source = readFileSync(file, "utf8");
+      for (const literal of literals) {
+        expect(source.includes(`>${literal}<`), `${path.basename(file)} hardcodes "${literal}" — call translate() instead`).toBe(false);
+        expect(source.includes(`="${literal}"`), `${path.basename(file)} hardcodes "${literal}" — call translate() instead`).toBe(false);
+      }
+    }
+  });
 });

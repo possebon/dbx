@@ -109,7 +109,7 @@ function createGroupFor(tableKey: string): void {
 
 <template>
   <div class="flex h-full min-h-0 bg-background text-foreground">
-    <DocsSidebar :sections="sections" :mode="mode" :active-key="activeKey" @update:mode="mode = $event" @select="open" @home="home()" />
+    <DocsSidebar :sections="sections" :mode="mode" :active-key="activeKey" :translate="translate" @update:mode="mode = $event" @select="open" @home="home()" />
 
     <main class="flex min-w-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
       <header class="flex flex-wrap items-start justify-between gap-3">
@@ -119,7 +119,7 @@ function createGroupFor(tableKey: string): void {
             {{ snapshot.project.databaseType }}<template v-if="snapshot.project.database"> · {{ snapshot.project.database }}</template> · {{ snapshot.tables.length }} tables · generated {{ snapshot.project.generatedAt }}
           </p>
         </div>
-        <DocsSearch :snapshot="snapshot" @select="open" @select-enum="openEnum" />
+        <DocsSearch :snapshot="snapshot" :translate="translate" @select="open" @select-enum="openEnum" />
       </header>
 
       <WarningBanner :warnings="snapshot.warnings" :translate="translate" />
@@ -129,7 +129,7 @@ function createGroupFor(tableKey: string): void {
         <WikiIndex :sections="sections" @select="open" />
 
         <section v-if="!isReadonly && annotationGroups.length > 0" class="flex flex-col gap-2">
-          <h2 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Groups</h2>
+          <h2 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{{ translate("docs.groups") }}</h2>
           <GroupEditor v-for="group in annotationGroups" :key="group.id" :group="group" :translate="translate" @update:group="emit('edit', { kind: 'upsertGroup', group: $event })" @delete="emit('edit', { kind: 'removeGroup', groupId: $event })" />
         </section>
       </div>
