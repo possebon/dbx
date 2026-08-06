@@ -11,24 +11,37 @@ import WikiIndex from "./components/WikiIndex.vue";
 import "./docs.css";
 import type { Translate } from "./docsWarnings";
 import { qualifiedTableKey } from "./docsKeys";
+import type { DocsRoute } from "./docsRoute";
 import { groupBySchema, groupByTableGroup } from "./docsIndex";
 import type { AnnotationFile, DocsEdit, GroupAnnotation, SchemaSnapshot } from "./types";
 
-const props = defineProps<{
-  snapshot: SchemaSnapshot;
-  /**
-   * The local notes layer. `snapshot` already carries notes merged for display,
-   * so this is here for what the merge erases: `groups` holds the editable
-   * `GroupAnnotation` records, while `snapshot.groups` holds resolved
-   * `TableGroup`s that GroupEditor and GroupPicker cannot write back to.
-   */
-  annotations: AnnotationFile;
-  readonly?: boolean;
-  translate: Translate;
-}>();
+const props = withDefaults(
+  defineProps<{
+    snapshot: SchemaSnapshot;
+    /**
+     * The local notes layer. `snapshot` already carries notes merged for display,
+     * so this is here for what the merge erases: `groups` holds the editable
+     * `GroupAnnotation` records, while `snapshot.groups` holds resolved
+     * `TableGroup`s that GroupEditor and GroupPicker cannot write back to.
+     */
+    annotations: AnnotationFile;
+    readonly?: boolean;
+    translate: Translate;
+    /**
+     * When provided, navigation is controlled by the host and mirrored back
+     * through `update:route`. Absent — the dialog's case — DocsApp owns its
+     * own navigation exactly as before and never touches the URL.
+     */
+    route?: DocsRoute;
+    /** `inline` renders SchemaDiagram; `external` leaves the host to offer its own. */
+    diagram?: "inline" | "external";
+  }>(),
+  { diagram: "external" },
+);
 
 const emit = defineEmits<{
   edit: [edit: DocsEdit];
+  "update:route": [route: DocsRoute];
 }>();
 
 /** `readonly` is the one optional prop; absent means editing is allowed. */
@@ -39,8 +52,24 @@ const annotationGroups = computed<GroupAnnotation[]>(() => props.annotations.gro
 // Grouping is computed once here and handed to both the sidebar and the index,
 // so the two can never disagree about what the sections are.
 const mode = ref<"schema" | "group">(props.snapshot.groups.length > 0 ? "group" : "schema");
-const activeKey = ref<string | null>(null);
-const activeEnumName = ref<string | null>(null);
+
+// Owned only when `route` is absent — see the prop doc above. `effectiveRoute`
+// prefers `props.route`, so once the host controls navigation, a click here
+// still updates these (harmless) but the DISPLAYED view tracks the prop, not
+// this state. That is what keeps the two from disagreeing if the host
+// declines to apply an `update:route`.
+const internalKey = ref<string | null>(null);
+const internalEnumName = ref<string | null>(null);
+
+const effectiveRoute = computed<DocsRoute>(() => {
+  if (props.route) return props.route;
+  if (internalEnumName.value !== null) return { kind: "enum", name: internalEnumName.value };
+  if (internalKey.value !== null) return { kind: "table", key: internalKey.value };
+  return { kind: "index" };
+});
+
+const activeKey = computed(() => (effectiveRoute.value.kind === "table" ? effectiveRoute.value.key : null));
+const activeEnumName = computed(() => (effectiveRoute.value.kind === "enum" ? effectiveRoute.value.name : null));
 
 const sections = computed(() => (mode.value === "schema" ? groupBySchema(props.snapshot) : groupByTableGroup(props.snapshot)));
 
@@ -72,21 +101,24 @@ function open(key: string): void {
   // A key naming no table leaves the reader where they are rather than
   // dropping them on a blank page.
   if (props.snapshot.tables.some((table) => qualifiedTableKey(table) === key)) {
-    activeEnumName.value = null;
-    activeKey.value = key;
+    internalEnumName.value = null;
+    internalKey.value = key;
+    emit("update:route", { kind: "table", key });
   }
 }
 
 function openEnum(name: string): void {
   if (props.snapshot.enums.some((value) => value.name === name)) {
-    activeKey.value = null;
-    activeEnumName.value = name;
+    internalKey.value = null;
+    internalEnumName.value = name;
+    emit("update:route", { kind: "enum", name });
   }
 }
 
 function home(): void {
-  activeKey.value = null;
-  activeEnumName.value = null;
+  internalKey.value = null;
+  internalEnumName.value = null;
+  emit("update:route", { kind: "index" });
 }
 
 /**
