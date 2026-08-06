@@ -56,7 +56,7 @@ const shadowedTitle = computed(() => (props.table.shadowedNote ? `Database comme
            one shadows that comment, which is what noteSource and shadowedNote
            below exist to disclose. -->
       <div class="flex items-start gap-2">
-        <span v-if="table.noteSource === 'LOCAL'" class="mt-0.5 shrink-0 text-[10px] font-medium text-muted-foreground" :title="shadowedTitle">⬤ LOCAL</span>
+        <span v-if="table.noteSource === 'LOCAL'" class="mt-0.5 shrink-0 text-[10px] font-medium text-muted-foreground" :title="shadowedTitle">⬤ {{ translate("docs.localNote") }}</span>
         <NoteEditor class="min-w-0 flex-1" :model-value="table.note ?? ''" :readonly="readonly" :translate="translate" @update:model-value="emit('edit', { kind: 'tableNote', tableKey: qualified, note: $event })" />
       </div>
 
