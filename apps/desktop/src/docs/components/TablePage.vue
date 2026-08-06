@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import type { Translate } from "../docsWarnings";
 import { qualifiedTableKey } from "../docsKeys";
 import { groupStyle } from "../groupColor";
-import { renderNote } from "../renderNote";
-import type { DocTable, Relationship, TableGroup } from "../types";
+import type { DocsEdit, DocTable, GroupAnnotation, Relationship, TableGroup } from "../types";
 import ColumnTable from "./ColumnTable.vue";
+import GroupPicker from "./GroupPicker.vue";
+import NoteEditor from "./NoteEditor.vue";
 import RelationshipList from "./RelationshipList.vue";
 
 const props = defineProps<{
@@ -13,10 +15,16 @@ const props = defineProps<{
   relationships: Relationship[];
   /** The table's group, or null when it belongs to none. */
   group: TableGroup | null;
+  /** The editable group records, which `group` above cannot be written back to. */
+  annotationGroups: GroupAnnotation[];
+  readonly: boolean;
+  translate: Translate;
 }>();
 
 const emit = defineEmits<{
   select: [tableKey: string];
+  edit: [edit: DocsEdit];
+  createGroup: [tableKey: string];
 }>();
 
 const qualified = computed(() => qualifiedTableKey(props.table));
@@ -42,15 +50,22 @@ const shadowedTitle = computed(() => (props.table.shadowedNote ? `Database comme
         <span v-if="table.estimatedRows !== null" class="text-[10px] text-muted-foreground"> ~{{ table.estimatedRows }} rows </span>
       </div>
 
-      <div v-if="table.note" class="flex items-start gap-2 text-sm text-muted-foreground">
-        <span v-if="table.noteSource === 'LOCAL'" class="mt-0.5 shrink-0 text-[10px] font-medium" :title="shadowedTitle">⬤ LOCAL</span>
-        <div v-html="renderNote(table.note)"></div>
+      <!-- NoteEditor is fed the MERGED note, not the local one. It renders and
+           edits a single value, so seeding it from the annotation file would
+           show nothing for a note that came from a database comment. Writing
+           one shadows that comment, which is what noteSource and shadowedNote
+           below exist to disclose. -->
+      <div class="flex items-start gap-2">
+        <span v-if="table.noteSource === 'LOCAL'" class="mt-0.5 shrink-0 text-[10px] font-medium text-muted-foreground" :title="shadowedTitle">⬤ LOCAL</span>
+        <NoteEditor class="min-w-0 flex-1" :model-value="table.note ?? ''" :readonly="readonly" :translate="translate" @update:model-value="emit('edit', { kind: 'tableNote', tableKey: qualified, note: $event })" />
       </div>
+
+      <GroupPicker v-if="!readonly" :groups="annotationGroups" :model-value="table.groupId" :translate="translate" @update:model-value="emit('edit', { kind: 'tableGroup', tableKey: qualified, groupId: $event })" @create="emit('createGroup', qualified)" />
     </header>
 
     <section>
       <h3 class="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Columns</h3>
-      <ColumnTable :columns="table.columns" :column-notes="table.columnNotes" />
+      <ColumnTable :columns="table.columns" :column-notes="table.columnNotes" :table-key="qualified" :readonly="readonly" :translate="translate" @edit="emit('edit', $event)" />
     </section>
 
     <section v-if="table.indexes.length > 0">

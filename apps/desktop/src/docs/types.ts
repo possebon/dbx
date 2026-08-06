@@ -173,6 +173,19 @@ export interface AnnotationFile {
 }
 
 /**
+ * What the viewer asks its host to do. The viewer never persists anything —
+ * that is what keeps `src/docs/` free of backend calls and bundleable into a
+ * standalone HTML file.
+ */
+export type DocsEdit =
+  | { kind: "projectNote"; note: string }
+  | { kind: "tableNote"; tableKey: string; note: string }
+  | { kind: "columnNote"; tableKey: string; column: string; note: string }
+  | { kind: "tableGroup"; tableKey: string; groupId: string | null }
+  | { kind: "upsertGroup"; group: GroupAnnotation }
+  | { kind: "removeGroup"; groupId: string };
+
+/**
  * Runtime witnesses for the interfaces above.
  *
  * TypeScript types are erased at runtime, so a test cannot enumerate an

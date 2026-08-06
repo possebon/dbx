@@ -9,6 +9,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   select: [tableKey: string];
+  selectEnum: [enumName: string];
 }>();
 
 const open = ref(false);
@@ -41,9 +42,21 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
+/** Enums navigate by name, everything else by table key; groups have neither. */
+function isNavigable(hit: SearchHit): boolean {
+  return hit.kind === "enum" || hit.tableKey !== null;
+}
+
 function choose(hit: SearchHit): void {
-  // Groups and enums have no page of their own yet, so they stay unclickable
-  // rather than navigating somewhere arbitrary.
+  // Enums navigate by name — they have no table key, and EnumPage resolves them
+  // by bare name for the same reason columnsUsingEnum does.
+  if (hit.kind === "enum") {
+    emit("selectEnum", hit.label);
+    open.value = false;
+    return;
+  }
+  // Groups still have no page of their own, so they stay unclickable rather
+  // than navigating somewhere arbitrary.
   if (hit.tableKey === null) {
     return;
   }
@@ -68,7 +81,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
         <ul class="max-h-80 overflow-y-auto">
           <li v-if="query.trim() !== '' && hits.length === 0" class="px-3 py-4 text-center text-xs text-muted-foreground">Nothing matches “{{ query }}”.</li>
           <li v-for="(hit, position) in hits" :key="`${hit.kind}-${hit.context}-${hit.label}-${position}`">
-            <button type="button" class="flex w-full items-baseline gap-2 px-3 py-1.5 text-left text-xs transition-colors" :class="hit.tableKey === null ? 'cursor-default text-muted-foreground' : 'hover:bg-muted/40'" :disabled="hit.tableKey === null" @click="choose(hit)">
+            <button type="button" class="flex w-full items-baseline gap-2 px-3 py-1.5 text-left text-xs transition-colors" :class="isNavigable(hit) ? 'hover:bg-muted/40' : 'cursor-default text-muted-foreground'" :disabled="!isNavigable(hit)" @click="choose(hit)">
               <span class="w-14 shrink-0 text-[10px] uppercase text-muted-foreground">{{ hit.kind }}</span>
               <span class="font-mono text-foreground">{{ hit.label }}</span>
               <span class="truncate text-[11px] text-muted-foreground">{{ hit.context }}</span>

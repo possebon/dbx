@@ -86,6 +86,19 @@ describe("docs viewer component contract", () => {
     }
   });
 
+  it("the viewer emits edits rather than persisting them", () => {
+    // src/docs/ must stay free of I/O so Part 3c can bundle it. Editing works
+    // by emitting upward; the dialog outside this directory does the saving.
+    const files = vueFiles();
+    expect(files.length).toBe(EXPECTED.length);
+    for (const file of files) {
+      const source = readFileSync(file, "utf8");
+      for (const needle of ["saveDocsAnnotations", "loadDocsAnnotations", "applyDocsAnnotations"]) {
+        expect(source.includes(needle), `${path.basename(file)} must not call ${needle}`).toBe(false);
+      }
+    }
+  });
+
   it("editing components accept a readonly mode", () => {
     // Part 3c renders these same components with editing off inside an
     // exported HTML file. A component that cannot be made read-only would

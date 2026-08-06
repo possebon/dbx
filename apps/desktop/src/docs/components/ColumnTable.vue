@@ -1,11 +1,20 @@
 <script setup lang="ts">
-import { renderNote } from "../renderNote";
-import type { ColumnInfo, ColumnNote } from "../types";
+import type { Translate } from "../docsWarnings";
+import type { ColumnInfo, ColumnNote, DocsEdit } from "../types";
+import NoteEditor from "./NoteEditor.vue";
 
 const props = defineProps<{
   columns: ColumnInfo[];
   /** Keyed by the column's real name, exactly as the snapshot emits it. */
   columnNotes: Record<string, ColumnNote>;
+  /** Qualified key of the table these columns belong to, for emitted edits. */
+  tableKey: string;
+  readonly: boolean;
+  translate: Translate;
+}>();
+
+const emit = defineEmits<{
+  edit: [edit: DocsEdit];
 }>();
 
 /** Rebuild the declared type from the parts the snapshot reports separately. */
@@ -77,10 +86,13 @@ function shadowedTitle(column: ColumnInfo): string | undefined {
             </div>
           </td>
           <td class="px-2 py-1.5 text-muted-foreground">
-            <template v-if="noteOf(column)">
-              <span v-if="noteOf(column)?.source === 'LOCAL'" class="mr-1 text-[10px] font-medium" :title="shadowedTitle(column)">⬤ LOCAL</span>
-              <div class="inline-block align-top" v-html="renderNote(noteOf(column)?.note ?? null)"></div>
-            </template>
+            <div class="flex items-start gap-1">
+              <span v-if="noteOf(column)?.source === 'LOCAL'" class="mt-0.5 shrink-0 text-[10px] font-medium" :title="shadowedTitle(column)">⬤ LOCAL</span>
+              <!-- Merged note, for the same reason as TablePage: NoteEditor
+                   renders and edits one value, and the local layer alone would
+                   hide notes that came from the database. -->
+              <NoteEditor class="min-w-0 flex-1" :model-value="noteOf(column)?.note ?? ''" :readonly="readonly" :translate="translate" @update:model-value="emit('edit', { kind: 'columnNote', tableKey, column: column.name, note: $event })" />
+            </div>
           </td>
         </tr>
       </tbody>
