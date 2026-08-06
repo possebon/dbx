@@ -68,10 +68,10 @@ function shadowedTitle(column: ColumnInfo): string | undefined {
     <table class="w-full text-xs">
       <thead>
         <tr class="bg-muted/30">
-          <th class="px-2 py-1.5 text-left font-medium text-muted-foreground">Column</th>
-          <th class="px-2 py-1.5 text-left font-medium text-muted-foreground">Type</th>
-          <th class="px-2 py-1.5 text-left font-medium text-muted-foreground">Settings</th>
-          <th class="px-2 py-1.5 text-left font-medium text-muted-foreground">Note</th>
+          <th class="px-2 py-1.5 text-left font-medium text-muted-foreground">{{ translate("docs.columnHeader") }}</th>
+          <th class="px-2 py-1.5 text-left font-medium text-muted-foreground">{{ translate("docs.typeHeader") }}</th>
+          <th class="px-2 py-1.5 text-left font-medium text-muted-foreground">{{ translate("docs.settingsHeader") }}</th>
+          <th class="px-2 py-1.5 text-left font-medium text-muted-foreground">{{ translate("docs.noteHeader") }}</th>
         </tr>
       </thead>
       <tbody>
