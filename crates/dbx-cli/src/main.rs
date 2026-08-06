@@ -484,7 +484,7 @@ async fn run_dbml(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, Cli
     let output = dbx_core::docs::to_dbml(&snapshot);
 
     for warning in &output.warnings {
-        eprintln!("warning: {warning:?}");
+        eprintln!("warning: {warning}");
     }
 
     match flags.out.as_ref() {

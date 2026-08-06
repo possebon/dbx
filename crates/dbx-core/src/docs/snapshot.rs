@@ -149,6 +149,39 @@ pub enum SnapshotWarning {
     DbmlOmitted { table: String, item: String, reason: String },
 }
 
+/// Human-readable warning text for headless callers.
+///
+/// The viewer translates these through its own `docs.warnings` namespace; the
+/// CLI has no i18n runtime, so the English prose lives here. Without it the
+/// only thing to print is the derived `Debug` form, which exposes the struct
+/// shape and reads like a panic rather than like advice.
+impl std::fmt::Display for SnapshotWarning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TableSkipped { table, reason } => {
+                write!(formatter, "{table} was skipped: {reason}. It is missing from this documentation.")
+            }
+            Self::NoForeignKeyMetadata { engine } => {
+                write!(
+                    formatter,
+                    "{engine} does not report foreign key metadata, so no relationships could be derived."
+                )
+            }
+            Self::CommentsUnsupported { engine } => write!(
+                formatter,
+                "{engine} does not support table or column comments, so every description comes from your own notes."
+            ),
+            Self::OrphanedNotes { count } => write!(
+                formatter,
+                "{count} note(s) refer to a table or column that no longer exists. Nothing was deleted."
+            ),
+            Self::DbmlOmitted { table, item, reason } => {
+                write!(formatter, "{item} on {table} is documented but omitted from the DBML: {reason}.")
+            }
+        }
+    }
+}
+
 impl DocTable {
     /// `schema.name` when a schema is present, otherwise bare `name`.
     pub fn qualified_name(&self) -> String {
@@ -231,5 +264,52 @@ mod tests {
     fn table_kind_serializes_as_screaming_snake_case() {
         let json = serde_json::to_string(&TableKind::MaterializedView).expect("serialize");
         assert_eq!(json, "\"MATERIALIZED_VIEW\"");
+    }
+
+    #[test]
+    fn every_warning_renders_as_prose() {
+        // `dbx dbml` prints these to stderr. The derived Debug form leaks the
+        // struct shape (`DbmlOmitted { table: "public.t", .. }`), which reads
+        // as a crash report rather than as advice, so Display is what the CLI
+        // must use. The wording tracks the viewer's own warning strings.
+        let cases = [
+            (
+                SnapshotWarning::TableSkipped { table: "public.orders".into(), reason: "permission denied".into() },
+                "public.orders was skipped: permission denied. It is missing from this documentation.",
+            ),
+            (
+                SnapshotWarning::NoForeignKeyMetadata { engine: "ClickHouse".into() },
+                "ClickHouse does not report foreign key metadata, so no relationships could be derived.",
+            ),
+            (
+                SnapshotWarning::CommentsUnsupported { engine: "SQLite".into() },
+                "SQLite does not support table or column comments, so every description comes from your own notes.",
+            ),
+            (
+                SnapshotWarning::OrphanedNotes { count: 3 },
+                "3 note(s) refer to a table or column that no longer exists. Nothing was deleted.",
+            ),
+            (
+                SnapshotWarning::DbmlOmitted {
+                    table: "public.orders".into(),
+                    item: "idx_partial".into(),
+                    reason: "partial index filter has no DBML equivalent".into(),
+                },
+                "idx_partial on public.orders is documented but omitted from the DBML: partial index filter has no DBML equivalent.",
+            ),
+        ];
+
+        for (warning, expected) in cases {
+            assert_eq!(warning.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn a_warning_never_renders_as_its_debug_form() {
+        // The regression this guards: reverting the CLI to `{warning:?}` is a
+        // one-character edit that still compiles and still prints something.
+        let warning = SnapshotWarning::OrphanedNotes { count: 1 };
+        assert!(!warning.to_string().contains('{'), "got: {warning}");
+        assert_ne!(warning.to_string(), format!("{warning:?}"));
     }
 }
