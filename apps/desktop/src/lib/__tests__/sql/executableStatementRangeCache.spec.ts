@@ -93,6 +93,58 @@ describe("executableStatementRangeCacheForDoc", () => {
     expect(executableStatementRangeAtCursor(cache, semicolonGapCursor)?.sql).toBe("SELECT 1");
   });
 
+  it("keeps a standalone next-line semicolon attached to the current statement", () => {
+    const sql = "SELECT *\nFROM users\n;\n\nSELECT * FROM audit;";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+    const delimiterCursor = sql.indexOf(";");
+
+    expect(executableStatementRangeAtCursor(cache, delimiterCursor)?.sql).toBe("SELECT *\nFROM users");
+    expect(executableStatementRangeAtCursor(cache, delimiterCursor + 1)?.sql).toBe("SELECT *\nFROM users");
+  });
+
+  it("resolves a trailing-whitespace cursor on a multi-line statement tail to that statement", () => {
+    const sql = "WITH x AS (SELECT 1)\nSELECT 2   \nSELECT 3;";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+    const contentEnd = sql.indexOf("SELECT 2") + "SELECT 2".length;
+
+    expect(executableStatementRangeAtCursor(cache, contentEnd)?.sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+    expect(executableStatementRangeAtCursor(cache, contentEnd + 1)?.sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+    expect(executableStatementRangeAtCursor(cache, contentEnd + 2)?.sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+  });
+
+  it("keeps the simple single-line trailing-whitespace case on the current statement", () => {
+    const sql = "SELECT 1;\nSELECT 2   \nSELECT 3;";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+    const contentEnd = sql.indexOf("SELECT 2") + "SELECT 2".length;
+
+    expect(executableStatementRangeAtCursor(cache, contentEnd)?.sql).toBe("SELECT 2");
+    expect(executableStatementRangeAtCursor(cache, contentEnd + 1)?.sql).toBe("SELECT 2");
+  });
+
+  it("keeps a trailing-whitespace cursor on a non-final line of a multi-line statement in the frame cache", () => {
+    const sql = "SELECT * FROM `profiles`;\nSELECT * FROM `users` AS uu   \nWHERE id = 2\nSELECT * FROM `orders`;";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+    const markerEnd = sql.indexOf("uu") + 2;
+    const lineEnd = sql.indexOf("\n", markerEnd);
+    const expected = "SELECT * FROM `users` AS uu   \nWHERE id = 2";
+
+    for (let pos = markerEnd; pos < lineEnd; pos += 1) {
+      expect(executableStatementRangeAtCursor(cache, pos)?.sql).toBe(expected);
+    }
+  });
+
+  it("does not attach a semicolon after a blank line to the previous statement", () => {
+    const sql = "SELECT 1\n\n;";
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+
+    expect(executableStatementRangeAtCursor(cache, sql.indexOf(";"))).toBeNull();
+  });
+
   it("returns null for blank and pure comment cursor lines", () => {
     const doc = Text.of(["SELECT 1;", "-- comment", "/* block comment */", "", "SELECT 2;"]);
     const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");

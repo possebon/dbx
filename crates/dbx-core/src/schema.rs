@@ -581,6 +581,10 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
             drop(connections);
             return db::influxdb_driver::list_databases(&client).await;
         }
+        if let Some(client) = extract_pool!(&connections, connection_id, VictoriaMetrics) {
+            drop(connections);
+            return db::victoriametrics_driver::list_databases(&client).await;
+        }
         try_sqlserver!(connections, connection_id, list_databases);
         if let Some(client) = extract_pool!(&connections, connection_id, Agent) {
             let is_mongo =
@@ -1779,6 +1783,20 @@ async fn agent_object_statistics_query(
         .await
 }
 
+#[cfg(feature = "mq-admin")]
+fn message_queue_topic_tables(topics: Vec<crate::mq::TopicInfo>) -> Vec<db::TableInfo> {
+    topics
+        .into_iter()
+        .map(|topic| db::TableInfo {
+            name: topic.name,
+            table_type: "TOPIC".to_string(),
+            comment: None,
+            parent_schema: topic.namespace,
+            parent_name: None,
+        })
+        .collect()
+}
+
 async fn list_tables_once(
     state: &AppState,
     connection_id: &str,
@@ -1794,6 +1812,25 @@ async fn list_tables_once(
     let pool_key =
         state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
     let db_config = connection_config(state, connection_id).await;
+
+    #[cfg(feature = "mq-admin")]
+    if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::MessageQueue) {
+        let topics = crate::mq::service::mq_list_topics_core(
+            state,
+            connection_id,
+            crate::mq::NamespaceRef { tenant: database.to_string(), namespace: schema.to_string() },
+            crate::mq::ListTopicsOpts::default(),
+        )
+        .await?;
+        return Ok(filter_table_infos(
+            message_queue_topic_tables(topics),
+            filter,
+            limit,
+            offset,
+            object_types,
+            table_name_filter,
+        ));
+    }
 
     {
         let connections = state.connections.read().await;
@@ -1851,6 +1888,12 @@ async fn list_tables_once(
         if let Some(client) = extract_pool!(&connections, &pool_key, InfluxDb) {
             drop(connections);
             return db::influxdb_driver::list_tables(&client, database)
+                .await
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
+        }
+        if let Some(client) = extract_pool!(&connections, &pool_key, VictoriaMetrics) {
+            drop(connections);
+            return db::victoriametrics_driver::list_tables(&client)
                 .await
                 .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
         }
@@ -2854,6 +2897,14 @@ mod tests {
     }
 
     #[test]
+    fn mysql_object_source_sql_emits_show_create_trigger() {
+        assert_eq!(
+            mysql_object_source_sql("tenant_db", "before_insert", &db::ObjectSourceKind::Trigger),
+            "SHOW CREATE TRIGGER `tenant_db`.`before_insert`"
+        );
+    }
+
+    #[test]
     fn mysql_object_source_sql_emits_show_create_materialized_view() {
         // Regression for the review comment: Doris / StarRocks ride on the MySQL
         // protocol, so the MV branch of mysql_object_source_sql must produce a
@@ -2880,6 +2931,7 @@ mod tests {
         assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::MaterializedView), 1);
         assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Procedure), 2);
         assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Function), 2);
+        assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Trigger), 2);
     }
 
     #[test]
@@ -3147,6 +3199,26 @@ for line in sys.stdin:
             parent_schema: None,
             parent_name: None,
         }
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[test]
+    fn message_queue_topics_are_exposed_as_table_metadata() {
+        let tables = super::message_queue_topic_tables(vec![crate::mq::TopicInfo {
+            name: "orders".to_string(),
+            short_name: "orders".to_string(),
+            partitioned: true,
+            partitions: Some(3),
+            persistent: true,
+            internal: false,
+            message_type: None,
+            namespace: Some("default".to_string()),
+        }]);
+
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].name, "orders");
+        assert_eq!(tables[0].table_type, "TOPIC");
+        assert_eq!(tables[0].parent_schema.as_deref(), Some("default"));
     }
 
     fn test_object_info(name: &str, object_type: &str) -> super::db::ObjectInfo {
@@ -4530,6 +4602,10 @@ async fn list_object_statistics_once(
             .await;
         }
     }
+    if let Some(client) = extract_pool!(&connections, &pool_key, VictoriaMetrics) {
+        drop(connections);
+        return db::victoriametrics_driver::list_object_statistics(&client).await;
+    }
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
     match pool {
         PoolKind::Mysql(p, mode) => {
@@ -5209,6 +5285,10 @@ async fn get_columns_core_for_session_inner(
                 drop(connections);
                 return db::influxdb_driver::get_columns(&client, database, table).await.map(deduplicate_column_infos);
             }
+            if let Some(client) = extract_pool!(&connections, &pool_key, VictoriaMetrics) {
+                drop(connections);
+                return db::victoriametrics_driver::get_columns(&client, table).await.map(deduplicate_column_infos);
+            }
             if let Some(linked) = crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema) {
                 if let Some(client) = extract_pool!(&connections, &pool_key, SqlServer) {
                     drop(connections);
@@ -5416,6 +5496,7 @@ fn deduplicate_column_infos(columns: Vec<db::ColumnInfo>) -> Vec<db::ColumnInfo>
     for column in columns {
         if let Some(existing) = result.iter_mut().find(|existing| existing.name == column.name) {
             existing.is_primary_key |= column.is_primary_key;
+            existing.is_unique |= column.is_unique;
             existing.is_nullable &= column.is_nullable;
             merge_optional_string(&mut existing.column_default, column.column_default);
             merge_optional_string(&mut existing.extra, column.extra);
@@ -5437,6 +5518,37 @@ fn deduplicate_column_infos(columns: Vec<db::ColumnInfo>) -> Vec<db::ColumnInfo>
         }
     }
     result
+}
+
+pub async fn get_all_columns_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+) -> Result<Vec<db::TableColumnsResult>, String> {
+    let tables = list_tables_core(state, connection_id, database, schema, None, None, None, None, None).await?;
+
+    let mut result: Vec<db::TableColumnsResult> = Vec::with_capacity(tables.len());
+    for table in tables {
+        match get_columns_core(state, connection_id, database, schema, &table.name).await {
+            Ok(columns) => {
+                result.push(db::TableColumnsResult { table_name: table.name, columns, error: None });
+            }
+            Err(e) => {
+                log::warn!(
+                    "[schema][get_all_columns] connection_id={} database={} schema={} table={} error={}",
+                    connection_id,
+                    database,
+                    schema,
+                    table.name,
+                    e
+                );
+                result.push(db::TableColumnsResult { table_name: table.name, columns: Vec::new(), error: Some(e) });
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 fn merge_optional_string(target: &mut Option<String>, candidate: Option<String>) {
@@ -6565,8 +6677,8 @@ pub fn mysql_object_source_sql(database: &str, name: &str, kind: &db::ObjectSour
         db::ObjectSourceKind::View => format!("SHOW CREATE VIEW {qualified_name}"),
         db::ObjectSourceKind::Procedure => format!("SHOW CREATE PROCEDURE {qualified_name}"),
         db::ObjectSourceKind::Function => format!("SHOW CREATE FUNCTION {qualified_name}"),
-        db::ObjectSourceKind::Trigger
-        | db::ObjectSourceKind::Sequence
+        db::ObjectSourceKind::Trigger => format!("SHOW CREATE TRIGGER {qualified_name}"),
+        db::ObjectSourceKind::Sequence
         | db::ObjectSourceKind::Synonym
         | db::ObjectSourceKind::Package
         | db::ObjectSourceKind::PackageBody
@@ -6590,7 +6702,7 @@ pub fn mysql_object_source_sql(database: &str, name: &str, kind: &db::ObjectSour
 /// The shape of the result is dialect-dependent:
 /// - `SHOW CREATE VIEW`, Doris/StarRocks `SHOW CREATE MATERIALIZED VIEW` →
 ///   `(Name, DDL)` → DDL at index `1`.
-/// - `SHOW CREATE PROCEDURE`, `SHOW CREATE FUNCTION` →
+/// - `SHOW CREATE PROCEDURE`, `SHOW CREATE FUNCTION`, `SHOW CREATE TRIGGER` →
 ///   `(Name, sql_mode, DDL, …)` → DDL at index `2`.
 ///
 /// Encoded as a function so the index can be unit-tested without a live DB.

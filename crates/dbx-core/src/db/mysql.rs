@@ -505,18 +505,59 @@ pub(crate) fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_j
         .unwrap_or(serde_json::Value::Null)
 }
 
-fn decode_mysql_geometry(bytes: &[u8]) -> Option<super::wkb::DecodedGeometry> {
+fn bytes_to_upper_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0F) as usize] as char);
+    }
+    output
+}
+
+// Native MySQL geometry values normally begin with a four-byte little-endian
+// SRID prefix. A bare WKB value can have 0 or 1 at byte four as well, so only
+// treat that prefix as present when the remaining bytes parse as WKB.
+fn mysql_geometry_wkb_parts(bytes: &[u8]) -> Option<(&[u8], u32)> {
     if bytes.len() >= 5 && matches!(bytes[4], 0 | 1) {
         let prefix: [u8; 4] = bytes[..4].try_into().ok()?;
-        if let Some(mut geometry) = super::wkb::decode_wkb_geometry(&bytes[4..]) {
-            if geometry.srid.is_none() {
-                let srid = u32::from_le_bytes(prefix);
-                geometry.srid = (srid != 0).then_some(srid);
-            }
-            return Some(geometry);
+        if super::wkb::decode_wkb_geometry(&bytes[4..]).is_some() {
+            return Some((&bytes[4..], u32::from_le_bytes(prefix)));
         }
     }
-    super::wkb::decode_wkb_geometry(bytes)
+    super::wkb::decode_wkb_geometry(bytes).map(|_| (bytes, 0))
+}
+
+fn mysql_geometry_to_export_marker(bytes: &[u8]) -> Option<String> {
+    let (wkb, srid) = mysql_geometry_wkb_parts(bytes)?;
+    Some(format!("DBX_WKB:{srid}:{}", bytes_to_upper_hex(wkb)))
+}
+
+fn mysql_value_to_json_for_export(
+    row: &mysql_async::Row,
+    idx: usize,
+    spatial_as_wkb: bool,
+) -> Result<serde_json::Value, String> {
+    if !spatial_as_wkb
+        || !row.columns_ref().get(idx).is_some_and(|column| column.column_type() == ColumnType::MYSQL_TYPE_GEOMETRY)
+    {
+        return Ok(mysql_value_to_json(row, idx));
+    }
+    let Some(bytes) = row_get::<Vec<u8>, _>(row, idx) else {
+        return Ok(mysql_value_to_json(row, idx));
+    };
+    mysql_geometry_to_export_marker(&bytes)
+        .map(serde_json::Value::String)
+        .ok_or_else(|| "Cannot export MySQL geometry value as WKB".to_string())
+}
+
+fn decode_mysql_geometry(bytes: &[u8]) -> Option<super::wkb::DecodedGeometry> {
+    let (wkb, srid) = mysql_geometry_wkb_parts(bytes)?;
+    let mut geometry = super::wkb::decode_wkb_geometry(wkb)?;
+    if geometry.srid.is_none() {
+        geometry.srid = (srid != 0).then_some(srid);
+    }
+    Some(geometry)
 }
 
 fn mysql_spatial_column_builder(columns: &[mysql_async::Column]) -> SpatialColumnBuilder {
@@ -1984,6 +2025,17 @@ pub async fn list_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableIn
     list_tables_filtered(pool, database, None, None, None, None, None).await
 }
 
+fn normalize_mysql_table_type(table_type: &str) -> String {
+    let trimmed = table_type.trim();
+    if trimmed.is_empty() {
+        return "TABLE".to_string();
+    }
+    if trimmed.eq_ignore_ascii_case("VIEW") || trimmed.eq_ignore_ascii_case("SYSTEM VIEW") {
+        return "VIEW".to_string();
+    }
+    trimmed.to_string()
+}
+
 pub async fn list_tables_filtered(
     pool: &MySqlPool,
     database: &str,
@@ -2014,7 +2066,7 @@ pub async fn list_tables_filtered(
             let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
             (!name.is_empty()).then_some(TableInfo {
                 name,
-                table_type: get_str_by_name(row, "TABLE_TYPE"),
+                table_type: normalize_mysql_table_type(&get_str_by_name(row, "TABLE_TYPE")),
                 comment: get_opt_str(row, "TABLE_COMMENT")
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
@@ -2088,8 +2140,8 @@ fn list_tables_sql(
             .map(|object_type| object_type.to_ascii_uppercase().replace(' ', "_"))
             .any(|object_type| object_type == "VIEW");
         match (wants_table, wants_view) {
-            (true, false) => sql.push_str(" AND TABLE_TYPE <> 'VIEW'"),
-            (false, true) => sql.push_str(" AND TABLE_TYPE = 'VIEW'"),
+            (true, false) => sql.push_str(" AND TABLE_TYPE NOT IN ('VIEW', 'SYSTEM VIEW')"),
+            (false, true) => sql.push_str(" AND TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW')"),
             (false, false) => sql.push_str(" AND 1 = 0"),
             (true, true) => {}
         }
@@ -2514,14 +2566,8 @@ async fn list_table_names_show_filtered(
             if name.is_empty() {
                 return None;
             }
-            let table_type = get_str(row, 1);
-            Some(TableInfo {
-                name,
-                table_type: if table_type.is_empty() { "TABLE".to_string() } else { table_type },
-                comment: None,
-                parent_schema: None,
-                parent_name: None,
-            })
+            let table_type = normalize_mysql_table_type(&get_str(row, 1));
+            Some(TableInfo { name, table_type, comment: None, parent_schema: None, parent_name: None })
         })
         .collect();
     tables.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2822,18 +2868,18 @@ fn list_tables_objects_sql(
     let wants_tables = requested_object_type(object_types, "TABLE");
     let wants_views = requested_object_type(object_types, "VIEW");
     let type_filter = match (wants_tables, wants_views) {
-        (true, false) => " AND TABLE_TYPE <> 'VIEW'",
-        (false, true) => " AND TABLE_TYPE = 'VIEW'",
+        (true, false) => " AND TABLE_TYPE NOT IN ('VIEW', 'SYSTEM VIEW')",
+        (false, true) => " AND TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW')",
         _ => "",
     };
     format!(
         "SELECT TABLE_NAME AS object_name, \
-           CASE WHEN TABLE_TYPE = 'VIEW' THEN 'VIEW' ELSE 'TABLE' END AS object_type, \
+           CASE WHEN TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW') THEN 'VIEW' ELSE 'TABLE' END AS object_type, \
            TABLE_COMMENT AS object_comment, \
            CREATE_TIME AS created_at, \
            UPDATE_TIME AS updated_at, \
            NULL AS parent_schema, NULL AS parent_name, \
-           CASE WHEN TABLE_TYPE = 'VIEW' THEN 1 ELSE 0 END AS sort_order \
+           CASE WHEN TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW') THEN 1 ELSE 0 END AS sort_order \
          FROM information_schema.TABLES \
          WHERE TABLE_SCHEMA = {db}{type_filter} \
          ORDER BY sort_order, object_name{pagination}",
@@ -3408,6 +3454,7 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
             };
             Some(ColumnInfo {
                 is_primary_key: column_key.eq_ignore_ascii_case("PRI"),
+                is_unique: column_key.eq_ignore_ascii_case("UNI"),
                 name,
                 data_type: column_type,
                 is_nullable: get_str_by_name(row, "IS_NULLABLE") == "YES",
@@ -3468,6 +3515,7 @@ pub async fn get_columns_show(pool: &MySqlPool, database: &str, table: &str) -> 
                 is_nullable: get_str_by_name(row, "Null").eq_ignore_ascii_case("YES"),
                 column_default: get_opt_str(row, "Default"),
                 is_primary_key: key.eq_ignore_ascii_case("PRI"),
+                is_unique: key.eq_ignore_ascii_case("UNI"),
                 extra: get_opt_str(row, "Extra"),
                 comment: get_opt_str(row, "Comment")
                     .map(|s| fix_potential_double_encoding(&s))
@@ -4004,7 +4052,7 @@ pub async fn stream_query_rows(
     mut on_row: impl FnMut(&[serde_json::Value]) -> Result<(), String>,
 ) -> Result<u64, String> {
     let mut conn = get_conn_with_health_check(pool).await?;
-    stream_query_result_on_conn(&mut conn, sql, bare, max_rows, dialect, cancelled, |item| {
+    stream_query_result_on_conn(&mut conn, sql, bare, max_rows, dialect, cancelled, false, |item| {
         if let MySqlQueryStreamItem::Row(row) = item {
             on_row(&row)?;
         }
@@ -4020,17 +4068,18 @@ pub async fn stream_query_result_on_conn(
     max_rows: Option<usize>,
     dialect: MySqlQueryDialect,
     cancelled: &AtomicBool,
+    spatial_as_wkb: bool,
     mut on_item: impl FnMut(MySqlQueryStreamItem) -> Result<(), String>,
 ) -> Result<u64, String> {
     let row_limit = max_rows.unwrap_or(usize::MAX);
 
     if bare || prefers_text_protocol_query(sql, dialect) {
-        stream_query_result_text(conn, sql, row_limit, cancelled, &mut on_item).await
+        stream_query_result_text(conn, sql, row_limit, cancelled, spatial_as_wkb, &mut on_item).await
     } else {
-        match stream_query_result_prepared(conn, sql, row_limit, cancelled, &mut on_item).await {
+        match stream_query_result_prepared(conn, sql, row_limit, cancelled, spatial_as_wkb, &mut on_item).await {
             Ok(rows) => Ok(rows),
             Err(err) if mysql_error_should_retry_with_text_protocol(&err) => {
-                stream_query_result_text(conn, sql, row_limit, cancelled, &mut on_item).await
+                stream_query_result_text(conn, sql, row_limit, cancelled, spatial_as_wkb, &mut on_item).await
             }
             Err(err) => Err(err),
         }
@@ -4042,6 +4091,7 @@ async fn stream_query_result_text(
     sql: &str,
     row_limit: usize,
     cancelled: &AtomicBool,
+    spatial_as_wkb: bool,
     on_item: &mut impl FnMut(MySqlQueryStreamItem) -> Result<(), String>,
 ) -> Result<u64, String> {
     let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
@@ -4067,7 +4117,9 @@ async fn stream_query_result_text(
             break;
         }
         let row = row.map_err(|e| e.to_string())?;
-        let values: Vec<serde_json::Value> = (0..row.len()).map(|i| mysql_value_to_json(&row, i)).collect();
+        let values: Vec<serde_json::Value> = (0..row.len())
+            .map(|i| mysql_value_to_json_for_export(&row, i, spatial_as_wkb))
+            .collect::<Result<_, _>>()?;
         on_item(MySqlQueryStreamItem::Row(values))?;
         rows_exported += 1;
     }
@@ -4080,6 +4132,7 @@ async fn stream_query_result_prepared(
     sql: &str,
     row_limit: usize,
     cancelled: &AtomicBool,
+    spatial_as_wkb: bool,
     on_item: &mut impl FnMut(MySqlQueryStreamItem) -> Result<(), String>,
 ) -> Result<u64, String> {
     let mut result = conn.exec_iter(sql, ()).await.map_err(|e| e.to_string())?;
@@ -4105,7 +4158,9 @@ async fn stream_query_result_prepared(
             break;
         }
         let row = row.map_err(|e| e.to_string())?;
-        let values: Vec<serde_json::Value> = (0..row.len()).map(|i| mysql_value_to_json(&row, i)).collect();
+        let values: Vec<serde_json::Value> = (0..row.len())
+            .map(|i| mysql_value_to_json_for_export(&row, i, spatial_as_wkb))
+            .collect::<Result<_, _>>()?;
         on_item(MySqlQueryStreamItem::Row(values))?;
         rows_exported += 1;
     }
@@ -4439,6 +4494,438 @@ pub async fn show_create_table_ddl(pool: &MySqlPool, database: &str, table: &str
         .ok_or_else(|| "Failed to read DDL".to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Doris / StarRocks multi-catalog support.
+//
+// These engines expose external catalogs (iceberg, hive, jdbc, ...) alongside
+// the native `internal` catalog via `SHOW CATALOGS`. The functions below address
+// objects in a specific catalog using 3-part qualified names
+// (`<catalog>.<database>.<table>`), which the engines accept directly without
+// needing to `SWITCH` the session catalog.
+// ---------------------------------------------------------------------------
+
+/// Build a 2-part qualified identifier `` `<catalog>`.`<database>` ``.
+fn doris_catalog_database_ref(catalog: &str, database: &str) -> String {
+    format!("{}.{}", quote_identifier(catalog), quote_identifier(database))
+}
+
+/// Build a 3-part qualified identifier `` `<catalog>`.`<database>`.`<table>` ``.
+fn doris_catalog_table_ref(catalog: &str, database: &str, table: &str) -> String {
+    format!("{}.{}.{}", quote_identifier(catalog), quote_identifier(database), quote_identifier(table))
+}
+
+/// `SHOW CATALOGS` → list of catalogs visible to the current user.
+///
+/// Column layouts differ between engines: Doris exposes `CatalogName` (with
+/// `CatalogId`/`IsCurrent`/`CreateTime`/`LastUpdateTime`), while StarRocks
+/// exposes `Catalog` (only `Type`/`Comment`, no `IsCurrent`). The name is read
+/// from either column; missing trailing columns degrade gracefully to
+/// empty/None. The built-in catalog is named `internal` in Doris and
+/// `default_catalog` in StarRocks (both with `Type=internal`); detection is
+/// type-based (see `CatalogInfo::is_internal`), not name-based.
+pub async fn list_doris_catalogs(pool: &MySqlPool) -> Result<Vec<crate::db::CatalogInfo>, String> {
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let result = conn.query_iter("SHOW CATALOGS").await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    let catalogs: Vec<crate::db::CatalogInfo> = rows
+        .iter()
+        .filter_map(|row| {
+            // Doris column is `CatalogName`; StarRocks column is `Catalog`.
+            let name = first_nonempty_str_by_name(row, &["CatalogName", "Catalog"]).trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let catalog_type = get_str_by_name(row, "Type").trim().to_string();
+            let is_current = {
+                let value = get_str_by_name(row, "IsCurrent").trim().to_ascii_lowercase();
+                !value.is_empty() && value != "no" && value != "false" && value != "0"
+            };
+            let comment = get_opt_str(row, "Comment").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            Some(crate::db::CatalogInfo { name, catalog_type, is_current, comment })
+        })
+        .collect();
+    Ok(normalize_doris_catalogs(catalogs))
+}
+
+/// Sort with the built-in catalog first, then the rest alphabetically by name.
+/// The built-in catalog is identified by `CatalogInfo::is_internal` (type-based)
+/// rather than by name, so StarRocks `default_catalog` sorts first just like
+/// Doris `internal`. No synthetic catalog is injected: `SHOW CATALOGS` always
+/// lists the built-in catalog on both engines, and a single-catalog result is
+/// handled by the flat-sidebar fallback in the caller.
+fn normalize_doris_catalogs(mut catalogs: Vec<crate::db::CatalogInfo>) -> Vec<crate::db::CatalogInfo> {
+    catalogs.sort_by(|a, b| match (a.is_internal(), b.is_internal()) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.cmp(&b.name),
+    });
+    catalogs
+}
+
+/// `SHOW DATABASES FROM <catalog>` → databases in the given catalog.
+pub async fn list_databases_show_from(pool: &MySqlPool, catalog: &str) -> Result<Vec<DatabaseInfo>, String> {
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let sql = format!("SHOW DATABASES FROM {}", quote_identifier(catalog));
+    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    Ok(database_infos_from_names(rows.iter().map(|row| get_str(row, 0)), false))
+}
+
+/// `SHOW TABLES FROM <catalog>.<database>` → tables in an external catalog.
+///
+/// External catalogs do not support `SHOW TABLE STATUS`, so comments/status are
+/// not fetched (the caller only needs names + types for browsing).
+pub async fn list_tables_show_from(pool: &MySqlPool, catalog: &str, database: &str) -> Result<Vec<TableInfo>, String> {
+    let sql = format!("SHOW TABLES FROM {}", doris_catalog_database_ref(catalog, database));
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    let mut tables: Vec<TableInfo> = rows
+        .iter()
+        .filter_map(|row| {
+            let name = get_str(row, 0).trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            // SHOW FULL TABLES exposes a type column; plain SHOW TABLES does not.
+            let table_type = get_str(row, 1);
+            Some(TableInfo {
+                name,
+                table_type: if table_type.trim().is_empty() { "TABLE".to_string() } else { table_type },
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            })
+        })
+        .collect();
+    tables.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(tables)
+}
+
+/// `SHOW COLUMNS FROM <catalog>.<database>.<table>` → columns of an external
+/// catalog table. Falls back to `DESCRIBE` if `SHOW COLUMNS` is rejected.
+pub async fn get_columns_show_from(
+    pool: &MySqlPool,
+    catalog: &str,
+    database: &str,
+    table: &str,
+) -> Result<Vec<ColumnInfo>, String> {
+    let qualified = doris_catalog_table_ref(catalog, database, table);
+    let full_sql = format!("SHOW FULL COLUMNS FROM {qualified}");
+    let plain_sql = format!("SHOW COLUMNS FROM {qualified}");
+    let describe_sql = format!("DESCRIBE {qualified}");
+    let mut conn = get_conn_with_health_check(pool).await?;
+    let rows: Vec<mysql_async::Row> = match conn.query_iter(&full_sql).await {
+        Ok(result) => result.collect_and_drop().await.map_err(|e| e.to_string())?,
+        Err(_) => match conn.query_iter(&plain_sql).await {
+            Ok(result) => result.collect_and_drop().await.map_err(|e| e.to_string())?,
+            Err(_) => {
+                let result = conn.query_iter(&describe_sql).await.map_err(|e| e.to_string())?;
+                result.collect_and_drop().await.map_err(|e| e.to_string())?
+            }
+        },
+    };
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let name = get_str_by_name(row, "Field").trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let key = get_str_by_name(row, "Key");
+            let collation = get_opt_str(row, "Collation").filter(|s| !s.is_empty());
+            Some(ColumnInfo {
+                name,
+                data_type: get_str_by_name(row, "Type"),
+                is_nullable: get_str_by_name(row, "Null").eq_ignore_ascii_case("YES"),
+                column_default: get_opt_str(row, "Default"),
+                is_primary_key: key.eq_ignore_ascii_case("PRI"),
+                is_unique: key.eq_ignore_ascii_case("UNI"),
+                extra: get_opt_str(row, "Extra"),
+                comment: get_opt_str(row, "Comment")
+                    .map(|s| fix_potential_double_encoding(&s))
+                    .filter(|s| !s.is_empty()),
+                numeric_precision: None,
+                numeric_scale: None,
+                character_maximum_length: None,
+                enum_values: None,
+                character_set: collation
+                    .as_deref()
+                    .and_then(|c| c.split_once('_').map(|(charset, _)| charset.to_string()))
+                    .filter(|s| !s.is_empty()),
+                collation,
+            })
+        })
+        .collect())
+}
+
+/// `SHOW CREATE TABLE <catalog>.<database>.<table>` → DDL for an external
+/// catalog table.
+pub async fn show_create_table_ddl_from(
+    pool: &MySqlPool,
+    catalog: &str,
+    database: &str,
+    table: &str,
+) -> Result<String, String> {
+    let sql = format!("SHOW CREATE TABLE {}", doris_catalog_table_ref(catalog, database, table));
+    let mut conn = get_conn_with_health_check(pool).await?;
+    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    let row = rows.first().ok_or("DDL not found")?;
+    row.get_opt::<String, usize>(1)
+        .and_then(|result| result.ok())
+        .or_else(|| {
+            row.get_opt::<Vec<u8>, usize>(1)
+                .and_then(|result| result.ok())
+                .map(|b| String::from_utf8_lossy(&b).to_string())
+        })
+        .ok_or_else(|| "Failed to read DDL".to_string())
+}
+
+/// Best-effort index listing for an external catalog table. External catalogs
+/// generally do not expose MySQL-style index metadata via `information_schema`
+/// (that view is scoped to the internal catalog), so indexes are derived from
+/// `SHOW CREATE TABLE` parsing. Returns empty on failure (graceful degradation
+/// — indexes are informational for external tables).
+pub async fn list_doris_catalog_indexes(
+    pool: &MySqlPool,
+    catalog: &str,
+    database: &str,
+    table: &str,
+) -> Result<Vec<IndexInfo>, String> {
+    let ddl = show_create_table_ddl_from(pool, catalog, database, table).await?;
+    Ok(doris_indexes_from_create_table_ddl(&ddl))
+}
+
+fn doris_indexes_from_create_table_ddl(ddl: &str) -> Vec<IndexInfo> {
+    let mut indexes = Vec::new();
+    for raw_line in ddl.lines() {
+        let line = trim_ddl_definition_line(raw_line);
+        if line.is_empty() {
+            continue;
+        }
+        let upper = line.to_ascii_uppercase();
+        if upper.starts_with("PRIMARY KEY") {
+            if let Some(index) = doris_table_key_index("PRIMARY", line, true, true, "PRIMARY KEY") {
+                indexes.push(index);
+            }
+        } else if upper.starts_with("UNIQUE KEY") {
+            if let Some(index) = doris_table_key_index("UNIQUE KEY", line, true, false, "UNIQUE KEY") {
+                indexes.push(index);
+            }
+        } else if upper.starts_with("INDEX ") {
+            if let Some(index) = doris_secondary_index(line) {
+                indexes.push(index);
+            }
+        }
+    }
+    indexes
+}
+
+fn trim_ddl_definition_line(line: &str) -> &str {
+    let mut trimmed = line.trim();
+    if let Some(rest) = trimmed.strip_prefix(',') {
+        trimmed = rest.trim_start();
+    }
+    while let Some(rest) = trimmed.strip_suffix(',') {
+        trimmed = rest.trim_end();
+    }
+    trimmed
+}
+
+fn doris_table_key_index(
+    name: &str,
+    line: &str,
+    is_unique: bool,
+    is_primary: bool,
+    index_type: &str,
+) -> Option<IndexInfo> {
+    let columns = parse_mysql_index_columns(first_parenthesized_content(line)?);
+    if columns.is_empty() {
+        return None;
+    }
+    Some(IndexInfo {
+        name: name.to_string(),
+        columns,
+        is_unique,
+        is_primary,
+        filter: None,
+        index_type: Some(index_type.to_string()),
+        included_columns: None,
+        comment: None,
+    })
+}
+
+fn doris_secondary_index(line: &str) -> Option<IndexInfo> {
+    let (_, rest) = split_keyword_prefix(line, "INDEX")?;
+    let (name, after_name) = read_mysql_identifier(rest.trim_start())?;
+    let columns = parse_mysql_index_columns(first_parenthesized_content(after_name)?);
+    if columns.is_empty() {
+        return None;
+    }
+    Some(IndexInfo {
+        name,
+        columns,
+        is_unique: false,
+        is_primary: false,
+        filter: None,
+        index_type: mysql_keyword_argument(after_name, "USING").or_else(|| Some("INDEX".to_string())),
+        included_columns: None,
+        comment: mysql_quoted_string_argument(after_name, "COMMENT"),
+    })
+}
+
+fn split_keyword_prefix<'a>(line: &'a str, keyword: &str) -> Option<(&'a str, &'a str)> {
+    if line.len() < keyword.len() || !line[..keyword.len()].eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let rest = &line[keyword.len()..];
+    if !rest.is_empty() && is_mysql_identifier_byte(rest.as_bytes()[0]) {
+        return None;
+    }
+    Some((&line[..keyword.len()], rest))
+}
+
+fn read_mysql_identifier(input: &str) -> Option<(String, &str)> {
+    let input = input.trim_start();
+    if input.is_empty() {
+        return None;
+    }
+    let bytes = input.as_bytes();
+    if bytes[0] == b'`' {
+        let mut i = 1;
+        let mut value = String::new();
+        while i < bytes.len() {
+            if bytes[i] == b'`' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'`' {
+                    value.push('`');
+                    i += 2;
+                    continue;
+                }
+                return Some((value, &input[i + 1..]));
+            }
+            let ch = input[i..].chars().next()?;
+            value.push(ch);
+            i += ch.len_utf8();
+        }
+        return None;
+    }
+
+    let end = input.find(|ch: char| ch.is_whitespace() || matches!(ch, '(' | ')' | ',')).unwrap_or(input.len());
+    if end == 0 {
+        return None;
+    }
+    Some((input[..end].to_string(), &input[end..]))
+}
+
+fn first_parenthesized_content(input: &str) -> Option<&str> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut start = None;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => {
+                i = skip_mysql_quoted(input, i, bytes[i]);
+                continue;
+            }
+            b'(' => {
+                if depth == 0 {
+                    start = Some(i + 1);
+                }
+                depth += 1;
+            }
+            b')' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    return start.map(|start| &input[start..i]);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn split_top_level_csv(input: &str) -> Vec<&str> {
+    let bytes = input.as_bytes();
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => {
+                i = skip_mysql_quoted(input, i, bytes[i]);
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' if depth > 0 => depth -= 1,
+            b',' if depth == 0 => {
+                parts.push(input[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(input[start..].trim());
+    parts
+}
+
+fn parse_mysql_index_columns(input: &str) -> Vec<String> {
+    split_top_level_csv(input)
+        .into_iter()
+        .filter_map(|part| read_mysql_identifier(part).map(|(column, _)| column))
+        .filter(|column| !column.is_empty())
+        .collect()
+}
+
+fn mysql_keyword_argument(input: &str, keyword: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => {
+                i = skip_mysql_quoted(input, i, bytes[i]);
+                continue;
+            }
+            _ if mysql_keyword_at(input, i, keyword) => {
+                return read_mysql_identifier(&input[i + keyword.len()..]).map(|(value, _)| value);
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn mysql_quoted_string_argument(input: &str, keyword: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => {
+                i = skip_mysql_quoted(input, i, bytes[i]);
+                continue;
+            }
+            _ if mysql_keyword_at(input, i, keyword) => {
+                let rest = input[i + keyword.len()..].trim_start();
+                if rest.as_bytes().first().copied() != Some(b'\'') {
+                    return None;
+                }
+                let end = skip_mysql_quoted(rest, 0, b'\'');
+                if end <= 1 || end > rest.len() {
+                    return None;
+                }
+                return Some(rest[1..end - 1].replace("\\'", "'").replace("''", "'"));
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
     let column_sql = format!(
         "SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, \
@@ -4599,6 +5086,23 @@ mod tests {
         let decoded = decode_mysql_geometry(&raw).unwrap();
         assert_eq!(decoded.wkt, "POINT(1 2)");
         assert_eq!(decoded.srid, None);
+        assert_eq!(
+            mysql_geometry_to_export_marker(&raw).as_deref(),
+            Some("DBX_WKB:0:0101000000000000000000F03F0000000000000040")
+        );
+    }
+
+    #[test]
+    fn mysql_geometry_export_marker_strips_internal_srid_prefix() {
+        let mut raw = 4326_u32.to_le_bytes().to_vec();
+        raw.extend_from_slice(&[
+            0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x40,
+        ]);
+        assert_eq!(
+            mysql_geometry_to_export_marker(&raw).as_deref(),
+            Some("DBX_WKB:4326:0101000000000000000000F03F0000000000000040")
+        );
     }
 
     #[test]
@@ -4844,13 +5348,22 @@ mod tests {
     fn mysql_list_tables_sql_filters_table_type_before_pagination() {
         let tables = vec!["TABLE".to_string()];
         let table_sql = list_tables_sql("app", None, Some(1000), None, Some(&tables), None);
-        assert!(table_sql.contains("TABLE_TYPE <> 'VIEW'"));
-        assert!(table_sql.find("TABLE_TYPE <> 'VIEW'") < table_sql.find("ORDER BY TABLE_NAME"));
+        assert!(table_sql.contains("TABLE_TYPE NOT IN ('VIEW', 'SYSTEM VIEW')"));
+        assert!(table_sql.find("TABLE_TYPE NOT IN ('VIEW', 'SYSTEM VIEW')") < table_sql.find("ORDER BY TABLE_NAME"));
         assert!(table_sql.find("ORDER BY TABLE_NAME") < table_sql.find("LIMIT 1000"));
 
         let views = vec!["VIEW".to_string()];
         let view_sql = list_tables_sql("app", None, Some(1000), None, Some(&views), None);
-        assert!(view_sql.contains("TABLE_TYPE = 'VIEW'"));
+        assert!(view_sql.contains("TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW')"));
+    }
+
+    #[test]
+    fn mysql_system_views_are_normalized_as_views() {
+        assert_eq!(normalize_mysql_table_type("SYSTEM VIEW"), "VIEW");
+        assert_eq!(normalize_mysql_table_type("view"), "VIEW");
+        assert_eq!(normalize_mysql_table_type("BASE TABLE"), "BASE TABLE");
+        assert_eq!(normalize_mysql_table_type("MATERIALIZED VIEW"), "MATERIALIZED VIEW");
+        assert_eq!(normalize_mysql_table_type(""), "TABLE");
     }
 
     #[test]
@@ -5256,7 +5769,8 @@ mod tests {
         let object_types = vec!["VIEW".to_string()];
         let sql = list_tables_objects_sql("app", Some(&object_types), Some(51), Some(100));
 
-        assert!(sql.contains("TABLE_TYPE = 'VIEW'"));
+        assert!(sql.contains("TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW')"));
+        assert!(sql.contains("CASE WHEN TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW') THEN 'VIEW' ELSE 'TABLE' END"));
         assert!(sql.ends_with("LIMIT 51 OFFSET 100"));
     }
 

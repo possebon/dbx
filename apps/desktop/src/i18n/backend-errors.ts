@@ -1,4 +1,5 @@
-import { normalizeBackendError, type BackendError } from "@/lib/backend/errorUtils";
+import { normalizeBackendError, sanitizeBackendErrorMessage, type BackendError } from "@/lib/backend/errorUtils";
+import { PHOENIX_DRIVER_NOT_INSTALLED_ERROR, PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR } from "@/lib/database/phoenixConnection";
 
 /**
  * Minimal shape of a translate function, satisfied by both `useI18n().t` inside
@@ -34,6 +35,11 @@ const taggedAiCliErrorKeys: Record<string, string> = {
   piAgentRunFailed: "ai.cliErrors.piAgentRunFailed",
 };
 
+const exactMessageKeys: Record<string, string> = {
+  [PHOENIX_DRIVER_NOT_INSTALLED_ERROR]: "connection.phoenixDriverNotInstalled",
+  [PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR]: "connection.phoenixDriverNotInstalled",
+};
+
 const patterns: [RegExp, string][] = [
   [/^(.+?) driver is not installed\. Please install it from the Driver Manager\.$/, "connection.driverNotInstalled"],
   [/^JRE (.+?) runtime is not installed\. Please install it from the Driver Manager\.$/, "connection.jreNotInstalled"],
@@ -41,6 +47,7 @@ const patterns: [RegExp, string][] = [
   [/^Custom Java runtime path is empty\. Please choose a Java executable\.$/, "connection.customJavaPathEmpty"],
   [/^Agent requires Java 21, but DBX started it with an older Java runtime\. Use DBX managed JRE 21 or select a Java 21 executable in Driver Manager\./, "connection.agentJavaTooOld"],
   [/^JDBC plugin is not installed\. Install the optional JDBC plugin to use this connection\.$/, "connection.jdbcPluginNotInstalled"],
+  [/GBASEDBTSERVER[\s\S]*DBSERVERNAME[\s\S]*DBSERVERALIASES/, "connection.gbaseServerMismatch"],
   [/^ai\.configNameExists:(.+)$/, "ai.configNameExists"],
 
   // Tunnel / proxy test messages
@@ -64,6 +71,9 @@ const patterns: [RegExp, string][] = [
   [/^Proxy host too long for SOCKS5 domain address$/, "settings.tunnelsSocksHostTooLong"],
   [/^SOCKS proxy connect rejected \(code (\d+)\)$/, "settings.tunnelsSocksConnectRejected"],
   [/^Unsupported SOCKS bound address type: (\d+)$/, "settings.tunnelsSocksUnsupportedAddrType"],
+
+  // SSH keyboard-interactive prompts (for example JumpServer TOTP).
+  [/^(?:SSH layer \d+ failed:\s*)?SSH keyboard-interactive authentication was cancelled$/, "connection.sshTotpCancelled"],
 
   // Query result export limits (crates/dbx-core/src/query_result_export.rs)
   [/^Streaming export is unsupported for this query\. Simplify it or use a supported driver\.$/, "exportProgress.streamingUnsupported"],
@@ -115,16 +125,19 @@ const paramNames: Record<string, string | string[]> = {
 };
 
 function backendErrorMessage(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
-  return String(error);
+  if (typeof error === "string") return sanitizeBackendErrorMessage(error);
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return sanitizeBackendErrorMessage(error.message);
+  return sanitizeBackendErrorMessage(String(error));
 }
 
 function translateStructuredBackendError(t: BackendErrorTranslate, error: BackendError): string {
   const translated = t(error.messageKey, error.messageParams);
   const summary = translated !== error.messageKey ? translated : t("backendErrors.unknown");
-  const detail = error.detail?.trim();
-  return detail && detail !== summary ? `${summary}\n\n${detail}` : summary;
+  const detail = error.detail ? sanitizeBackendErrorMessage(error.detail).trim() : undefined;
+  const rawAdapterCode = error.diagnostics?.adapterCode;
+  const adapterCode = typeof rawAdapterCode === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(rawAdapterCode) ? rawAdapterCode : undefined;
+  const diagnosticDetail = detail && adapterCode ? `[${adapterCode}] ${detail}` : (detail ?? adapterCode);
+  return diagnosticDetail && diagnosticDetail !== summary ? `${summary}\n\n${diagnosticDetail}` : summary;
 }
 
 export function translateBackendError(t: BackendErrorTranslate, error: unknown): string {
@@ -132,6 +145,9 @@ export function translateBackendError(t: BackendErrorTranslate, error: unknown):
   if (structured) return translateStructuredBackendError(t, structured);
 
   const message = backendErrorMessage(error);
+  const exactKey = exactMessageKeys[message];
+  if (exactKey) return t(exactKey);
+
   const tagged = message.match(/^\[([A-Za-z][A-Za-z0-9]+)\]\s*([\s\S]*)$/);
   if (tagged) {
     const [, code, rawDetail] = tagged;
