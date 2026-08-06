@@ -87,7 +87,7 @@ function shadowedTitle(column: ColumnInfo): string | undefined {
           </td>
           <td class="px-2 py-1.5 text-muted-foreground">
             <div class="flex items-start gap-1">
-              <span v-if="noteOf(column)?.source === 'LOCAL'" class="mt-0.5 shrink-0 text-[10px] font-medium" :title="shadowedTitle(column)">⬤ LOCAL</span>
+              <span v-if="noteOf(column)?.source === 'LOCAL'" class="mt-0.5 shrink-0 text-[10px] font-medium" :title="shadowedTitle(column)">⬤ {{ translate("docs.localNote") }}</span>
               <!-- Merged note, for the same reason as TablePage: NoteEditor
                    renders and edits one value, and the local layer alone would
                    hide notes that came from the database. -->

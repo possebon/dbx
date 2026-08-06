@@ -26,6 +26,44 @@ function scriptOf(file: string): string {
   return `${descriptor.script?.content ?? ""}\n${descriptor.scriptSetup?.content ?? ""}`;
 }
 
+/**
+ * Splits a component's template into the two channels that can actually
+ * reach the reader as text: static text between tags, and the JS
+ * expressions inside `{{ }}` interpolations. Attribute values (`:class="…"`,
+ * `:title="…"`) are deliberately excluded — see the guard below for why.
+ *
+ * The two channels get different treatment below: `staticText` is scanned
+ * with plain substring matching, because it can't contain anything but
+ * literal characters. `interpolations` holds JS, where a bare identifier
+ * (`table.viewDefinition`, `snapshot.project.databaseType`) can innocently
+ * contain a locale word as a substring — only a *quoted* occurrence
+ * (`"literal"` or `'literal'`) inside an expression counts as hardcoded copy.
+ */
+function domTextOf(file: string): { staticText: string; interpolations: string[] } {
+  const { descriptor } = parse(readFileSync(file, "utf8"), { filename: file });
+  const template = descriptor.template?.content ?? "";
+  // Comments are prose, not display text, and can otherwise trip a
+  // substring match by coincidence (a comment mentioning "the note" would
+  // false-positive on the `noteHeader` key).
+  const withoutComments = template.replace(/<!--[\s\S]*?-->/g, "");
+
+  const interpolations: string[] = [];
+  const withoutInterpolations = withoutComments.replace(/{{([\s\S]*?)}}/g, (_match, expr) => {
+    interpolations.push(expr);
+    return "";
+  });
+
+  // Whatever sits between a tag's closing `>` and the next `<` is DOM text;
+  // whatever sits before that `>`, inside the tag itself, is an attribute
+  // and never renders as visible text — so this intentionally never looks
+  // there.
+  const segments: string[] = [];
+  for (const match of withoutInterpolations.matchAll(/>([^<]*)</g)) {
+    segments.push(match[1]);
+  }
+  return { staticText: segments.join(" "), interpolations };
+}
+
 const EXPECTED = ["ColumnTable.vue", "DocsApp.vue", "DocsSearch.vue", "DocsSidebar.vue", "EnumPage.vue", "GroupEditor.vue", "GroupPicker.vue", "NoteEditor.vue", "RelationshipList.vue", "TablePage.vue", "WarningBanner.vue", "WikiIndex.vue"];
 
 describe("docs viewer component contract", () => {
@@ -177,11 +215,38 @@ describe("docs viewer component contract", () => {
     const files = vueFiles();
     expect(files.length).toBe(EXPECTED.length);
     for (const file of files) {
-      const source = readFileSync(file, "utf8");
+      // Deliberately scoped to what reaches the DOM as text — see domTextOf
+      // — rather than the whole file. Two earlier, narrower shapes of this
+      // same guard both ran green over a real defect: matching only
+      // `>literal<` misses a literal buried in a JS fallback
+      // (`section.label || "(no schema)"`, DocsSidebar.vue/WikiIndex.vue);
+      // matching any quoted occurrence anywhere in the template misses
+      // nothing display-related but flags plenty that isn't — a bare
+      // identifier like `table.viewDefinition` or
+      // `snapshot.project.databaseType` shares a substring with a locale
+      // word purely by accident, and an attribute-only comparison like
+      // `noteOf(column)?.source === 'LOCAL'` tests data, not copy.
+      const { staticText, interpolations } = domTextOf(file);
       for (const literal of literals) {
-        expect(source.includes(`>${literal}<`), `${path.basename(file)} hardcodes "${literal}" — call translate() instead`).toBe(false);
-        expect(source.includes(`="${literal}"`), `${path.basename(file)} hardcodes "${literal}" — call translate() instead`).toBe(false);
+        // Static text, e.g. `>Overview<` or `>⬤ LOCAL<` — anything literally
+        // written between tags is definitionally display text, so a plain
+        // substring match is safe here.
+        expect(staticText.includes(literal), `${path.basename(file)} hardcodes "${literal}" — call translate() instead`).toBe(false);
+        // A JS expression inside a `{{ }}` mustache, e.g.
+        // `section.label || "(no schema)"`. Only a *quoted* occurrence
+        // counts — an unquoted one is a property/variable name, not copy.
+        expect(
+          interpolations.some((expr) => expr.includes(`"${literal}"`) || expr.includes(`'${literal}'`)),
+          `${path.basename(file)} hardcodes "${literal}" in a template expression — call translate() instead`,
+        ).toBe(false);
       }
     }
+    // Known gap, accepted rather than chased: a literal passed to an
+    // attribute binding — `:title="'Hardcoded text'"` — can still reach the
+    // reader (as a tooltip, an aria-label, …) and this guard does not see
+    // it, because attribute values are excluded by design to avoid the
+    // data-comparison false positives above. If a future defect turns out
+    // to live in an attribute, that's this guard's known blind spot, not a
+    // regression in it.
   });
 });

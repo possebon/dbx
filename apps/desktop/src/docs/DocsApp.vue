@@ -126,7 +126,7 @@ function createGroupFor(tableKey: string): void {
 
       <div v-if="view === 'index'" class="flex flex-col gap-4">
         <NoteEditor :model-value="snapshot.project.note ?? ''" :readonly="isReadonly" :translate="translate" @update:model-value="emit('edit', { kind: 'projectNote', note: $event })" />
-        <WikiIndex :sections="sections" @select="open" />
+        <WikiIndex :sections="sections" :translate="translate" @select="open" />
 
         <section v-if="!isReadonly && annotationGroups.length > 0" class="flex flex-col gap-2">
           <h2 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{{ translate("docs.groups") }}</h2>

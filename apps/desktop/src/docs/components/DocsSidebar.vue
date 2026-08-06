@@ -35,7 +35,7 @@ const emit = defineEmits<{
       <div class="flex items-center gap-1.5 px-2 py-1" :class="{ 'docs-group': section.hue !== null }" :style="groupStyle(section.hue)">
         <span v-if="section.hue !== null" class="h-2 w-2 shrink-0 rounded-full" style="background-color: var(--group-c)"></span>
         <span class="truncate text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-          {{ section.label || "(no schema)" }}
+          {{ section.label || translate("docs.noSchema") }}
         </span>
       </div>
       <button
