@@ -1,3 +1,4 @@
+import { qualifiedTableKey } from "./docsKeys";
 import type { DocTable, SchemaSnapshot } from "./types";
 
 export interface IndexSection {
@@ -66,4 +67,22 @@ export function groupByTableGroup(snapshot: SchemaSnapshot): IndexSection[] {
   }
 
   return sections;
+}
+
+/**
+ * Every column whose declared type is this enum.
+ *
+ * Exact match on `data_type`, never a substring: an enum named `state` would
+ * otherwise claim every column of type `estado` or `statement`.
+ */
+export function columnsUsingEnum(snapshot: SchemaSnapshot, enumName: string): Array<{ tableKey: string; table: string; column: string }> {
+  const hits: Array<{ tableKey: string; table: string; column: string }> = [];
+  for (const table of snapshot.tables) {
+    for (const column of table.columns) {
+      if (column.data_type === enumName) {
+        hits.push({ tableKey: qualifiedTableKey(table), table: table.name, column: column.name });
+      }
+    }
+  }
+  return hits;
 }
