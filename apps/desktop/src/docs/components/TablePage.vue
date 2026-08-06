@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { qualifiedTableKey } from "../docsKeys";
 import { groupStyle } from "../groupColor";
 import { renderNote } from "../renderNote";
 import type { DocTable, Relationship, TableGroup } from "../types";
@@ -18,7 +19,7 @@ const emit = defineEmits<{
   select: [tableKey: string];
 }>();
 
-const qualified = computed(() => (props.table.schema ? `${props.table.schema}.${props.table.name}` : props.table.name));
+const qualified = computed(() => qualifiedTableKey(props.table));
 
 const kindLabel = computed(() => props.table.kind.toLowerCase().replace(/_/g, " "));
 

@@ -1,3 +1,4 @@
+import { qualifiedTableKey } from "./docsKeys";
 import type { SchemaSnapshot } from "./types";
 
 export interface SearchHit {
@@ -7,10 +8,6 @@ export interface SearchHit {
   context: string;
   /** Qualified table name for navigation, or null for groups and enums. */
   tableKey: string | null;
-}
-
-function qualified(schema: string | null, name: string): string {
-  return schema ? `${schema}.${name}` : name;
 }
 
 /** Per-kind result caps. A single overall cap lets columns — by far the most
@@ -36,7 +33,7 @@ export function searchDocs(snapshot: SchemaSnapshot, query: string): SearchHit[]
   const columns: SearchHit[] = [];
 
   for (const table of snapshot.tables) {
-    const key = qualified(table.schema, table.name);
+    const key = qualifiedTableKey(table);
     if (table.name.toLowerCase().includes(needle)) {
       tables.push({ kind: "table", label: table.name, context: key, tableKey: key });
     }

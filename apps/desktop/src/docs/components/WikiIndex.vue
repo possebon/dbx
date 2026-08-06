@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import type { IndexSection } from "../docsIndex";
+import { qualifiedTableKey } from "../docsKeys";
 import { groupStyle } from "../groupColor";
 import { renderNote } from "../renderNote";
-import type { DocTable } from "../types";
 
 defineProps<{
   sections: IndexSection[];
@@ -11,10 +11,6 @@ defineProps<{
 const emit = defineEmits<{
   select: [tableKey: string];
 }>();
-
-function tableKey(table: DocTable): string {
-  return table.schema ? `${table.schema}.${table.name}` : table.name;
-}
 </script>
 
 <template>
@@ -33,8 +29,8 @@ function tableKey(table: DocTable): string {
              the <button> that would be invalid nesting and the link would not
              be keyboard reachable, so the note is a sibling of the button and
              the <li> carries the card. -->
-        <li v-for="table in section.tables" :key="tableKey(table)" class="flex flex-col gap-0.5 rounded border border-border bg-background px-2 py-1.5 transition-colors hover:bg-muted/40">
-          <button type="button" class="flex w-full items-baseline gap-1.5 text-left" @click="emit('select', tableKey(table))">
+        <li v-for="table in section.tables" :key="qualifiedTableKey(table)" class="flex flex-col gap-0.5 rounded border border-border bg-background px-2 py-1.5 transition-colors hover:bg-muted/40">
+          <button type="button" class="flex w-full items-baseline gap-1.5 text-left" @click="emit('select', qualifiedTableKey(table))">
             <span class="font-mono text-xs font-medium text-foreground">{{ table.name }}</span>
             <span v-if="table.kind !== 'TABLE'" class="text-[10px] uppercase text-muted-foreground">
               {{ table.kind.toLowerCase().replace(/_/g, " ") }}

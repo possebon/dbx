@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { groupBySchema, groupByTableGroup } from "../docsIndex";
+import { columnsUsingEnum, groupBySchema, groupByTableGroup } from "../docsIndex";
 import type { DocTable, SchemaSnapshot, TableGroup } from "../types";
 
 function table(schema: string | null, name: string, groupId: string | null = null): DocTable {
@@ -82,5 +82,71 @@ describe("groupByTableGroup", () => {
     const sections = groupByTableGroup(snapshot([table("core", "orders", "ghost")], groups));
     expect(sections).toHaveLength(1);
     expect(sections[0].key).toBe("");
+  });
+});
+
+describe("columnsUsingEnum", () => {
+  // The file's existing helper is `table(schema, name, groupId)` and builds a
+  // table with NO columns, so these tests need columns attached. Add this
+  // helper beside it rather than changing the existing signature — the other
+  // tests in this file call it positionally.
+  function withColumns(base: DocTable, columns: Array<{ name: string; type: string }>): DocTable {
+    return {
+      ...base,
+      columns: columns.map((column) => ({
+        name: column.name,
+        data_type: column.type,
+        is_nullable: false,
+        column_default: null,
+        is_primary_key: false,
+        extra: "",
+        comment: null,
+        numeric_precision: null,
+        numeric_scale: null,
+        character_maximum_length: null,
+      })),
+    };
+  }
+
+  function snapshotOf(tables: DocTable[], enums: SchemaSnapshot["enums"]): SchemaSnapshot {
+    return {
+      formatVersion: 1,
+      project: { name: "p", databaseType: "postgres", database: null, schemas: [], generatedAt: "", note: null },
+      tables,
+      relationships: [],
+      groups: [],
+      enums,
+      warnings: [],
+    };
+  }
+
+  it("finds every column using an enum, across tables", () => {
+    const snapshot = snapshotOf(
+      [withColumns(table("public", "orders"), [{ name: "status", type: "order_status" }]), withColumns(table("public", "returns"), [{ name: "state", type: "order_status" }]), withColumns(table("public", "users"), [{ name: "id", type: "integer" }])],
+      [{ schema: "public", name: "order_status", values: ["new"], note: null, synthesized: false }],
+    );
+
+    expect(columnsUsingEnum(snapshot, "order_status")).toEqual([
+      { tableKey: "public.orders", table: "orders", column: "status" },
+      { tableKey: "public.returns", table: "returns", column: "state" },
+    ]);
+  });
+
+  it("returns nothing for an enum no column references", () => {
+    // Must not fall back to "every column". The `statement` column is the one
+    // that matters: it is the only type here that *contains* `state`, so a
+    // substring match would claim it while an unrelated type like `integer`
+    // would not. Drop it and this test passes against `includes()` too, which
+    // makes it stop guarding anything.
+    const snapshot = snapshotOf(
+      [
+        withColumns(table("public", "users"), [
+          { name: "id", type: "integer" },
+          { name: "body", type: "statement" },
+        ]),
+      ],
+      [{ schema: "public", name: "state", values: ["a"], note: null, synthesized: false }],
+    );
+    expect(columnsUsingEnum(snapshot, "state")).toEqual([]);
   });
 });

@@ -7,9 +7,10 @@ import WarningBanner from "./components/WarningBanner.vue";
 import WikiIndex from "./components/WikiIndex.vue";
 import "./docs.css";
 import type { Translate } from "./docsWarnings";
+import { qualifiedTableKey } from "./docsKeys";
 import { groupBySchema, groupByTableGroup } from "./docsIndex";
 import { renderNote } from "./renderNote";
-import type { DocTable, SchemaSnapshot } from "./types";
+import type { SchemaSnapshot } from "./types";
 
 const props = defineProps<{
   snapshot: SchemaSnapshot;
@@ -21,13 +22,9 @@ const props = defineProps<{
 const mode = ref<"schema" | "group">(props.snapshot.groups.length > 0 ? "group" : "schema");
 const activeKey = ref<string | null>(null);
 
-function tableKey(table: DocTable): string {
-  return table.schema ? `${table.schema}.${table.name}` : table.name;
-}
-
 const sections = computed(() => (mode.value === "schema" ? groupBySchema(props.snapshot) : groupByTableGroup(props.snapshot)));
 
-const activeTable = computed(() => props.snapshot.tables.find((table) => tableKey(table) === activeKey.value) ?? null);
+const activeTable = computed(() => props.snapshot.tables.find((table) => qualifiedTableKey(table) === activeKey.value) ?? null);
 
 /** "table" whenever a table is open, "index" otherwise. */
 const view = computed<"index" | "table">(() => (activeTable.value === null ? "index" : "table"));
@@ -43,7 +40,7 @@ const activeGroup = computed(() => {
 function open(key: string): void {
   // A key naming no table leaves the reader where they are rather than
   // dropping them on a blank page.
-  if (props.snapshot.tables.some((table) => tableKey(table) === key)) {
+  if (props.snapshot.tables.some((table) => qualifiedTableKey(table) === key)) {
     activeKey.value = key;
   }
 }

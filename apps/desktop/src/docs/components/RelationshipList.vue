@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { qualifiedTableKey } from "../docsKeys";
 import type { FieldRef, Relationship } from "../types";
 
 const props = defineProps<{
@@ -17,8 +18,10 @@ function isCurrent(field: FieldRef): boolean {
   return field.table === props.table && (field.schema ?? null) === props.schema;
 }
 
+// FieldRef names its table property `table`, not `name`, so it is remapped
+// rather than passed to qualifiedTableKey directly.
 function keyOf(field: FieldRef): string {
-  return field.schema ? `${field.schema}.${field.table}` : field.table;
+  return qualifiedTableKey({ schema: field.schema, name: field.table });
 }
 
 function label(field: FieldRef): string {

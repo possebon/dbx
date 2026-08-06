@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { IndexSection } from "../docsIndex";
+import { qualifiedTableKey } from "../docsKeys";
 import { groupStyle } from "../groupColor";
-import type { DocTable } from "../types";
 
 defineProps<{
   sections: IndexSection[];
@@ -15,10 +15,6 @@ const emit = defineEmits<{
   select: [tableKey: string];
   home: [];
 }>();
-
-function tableKey(table: DocTable): string {
-  return table.schema ? `${table.schema}.${table.name}` : table.name;
-}
 </script>
 
 <template>
@@ -42,11 +38,11 @@ function tableKey(table: DocTable): string {
       </div>
       <button
         v-for="table in section.tables"
-        :key="tableKey(table)"
+        :key="qualifiedTableKey(table)"
         type="button"
         class="truncate rounded px-2 py-1 text-left font-mono text-xs transition-colors"
-        :class="activeKey === tableKey(table) ? 'bg-muted text-foreground' : 'text-muted-foreground hover:bg-muted/40'"
-        @click="emit('select', tableKey(table))"
+        :class="activeKey === qualifiedTableKey(table) ? 'bg-muted text-foreground' : 'text-muted-foreground hover:bg-muted/40'"
+        @click="emit('select', qualifiedTableKey(table))"
       >
         {{ table.name }}
       </button>

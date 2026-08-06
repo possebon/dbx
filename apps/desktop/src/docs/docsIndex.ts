@@ -73,7 +73,7 @@ export function groupByTableGroup(snapshot: SchemaSnapshot): IndexSection[] {
  * Every column whose declared type is this enum.
  *
  * Exact match on `data_type`, never a substring: an enum named `state` would
- * otherwise claim every column of type `estado` or `statement`.
+ * otherwise claim every column of type `statement`.
  */
 export function columnsUsingEnum(snapshot: SchemaSnapshot, enumName: string): Array<{ tableKey: string; table: string; column: string }> {
   const hits: Array<{ tableKey: string; table: string; column: string }> = [];
