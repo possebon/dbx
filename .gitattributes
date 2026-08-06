@@ -11,3 +11,10 @@ apps/desktop/src/**/*.test.ts linguist-vendored
 packages/**/tests/** linguist-vendored
 packages/**/*.spec.ts linguist-vendored
 packages/**/*.test.ts linguist-vendored
+
+# Build output, committed because the Rust crate embeds it. Minified and large,
+# so it would drown every diff and review it appears in — `-diff` makes git
+# report "Binary files differ" instead. The manifest stays diffable on purpose:
+# it is how a reviewer sees which sources moved.
+crates/dbx-core/assets/docs-export.js -diff linguist-generated
+crates/dbx-core/assets/docs-export.css -diff linguist-generated
