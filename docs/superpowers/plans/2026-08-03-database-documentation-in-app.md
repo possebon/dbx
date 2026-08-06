@@ -68,7 +68,7 @@
 - Consumes: `AnnotationFile` (existing), `ConnectionConfig` (existing, `docs_notes_path: Option<String>`)
 - Produces: `save_annotations(path: &Path, annotations: &AnnotationFile) -> Result<(), String>`, `resolve_notes_path(connection_id: &str, docs_notes_path: Option<&str>, data_dir: &Path) -> PathBuf`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the existing `mod tests` in `annotations.rs`:
 
@@ -197,7 +197,7 @@ dependency of this crate. Add this helper inside `mod tests` beside the others:
     }
 ```
 
-- [ ] **Step 2: Run and watch them fail**
+- [x] **Step 2: Run and watch them fail**
 
 ```bash
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
@@ -205,7 +205,7 @@ cargo test -p dbx-core --lib docs::annotations
 ```
 Expected: FAIL — `save_annotations` and `resolve_notes_path` are not defined.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add to `annotations.rs`. It already has `use std::path::Path`; add `std::io::Write` and `std::path::PathBuf`.
 
@@ -260,20 +260,20 @@ pub fn resolve_notes_path(connection_id: &str, docs_notes_path: Option<&str>, da
 
 Add `use crate::models::connection::ConnectionConfig;` if the file does not already import it.
 
-- [ ] **Step 4: Run and watch them pass**
+- [x] **Step 4: Run and watch them pass**
 
 ```bash
 cargo test -p dbx-core --lib docs::annotations
 ```
 
-- [ ] **Step 5: Verify two guards bite**
+- [x] **Step 5: Verify two guards bite**
 
 One at a time, restoring between each. Report both failure messages.
 
 1. Replace the temp-file-and-rename body with a direct `std::fs::write(path, json)` → `a_failed_save_leaves_the_previous_file_intact` must fail.
 2. Delete the `.filter(|value| !value.is_empty())` from `resolve_notes_path` → `a_blank_notes_path_falls_back_to_the_default` must fail.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
@@ -294,7 +294,7 @@ git commit -m "feat(docs): add atomic annotation save and notes path resolution"
 - Consumes: `save_annotations`, `resolve_notes_path` (Task 1); existing `collect_snapshot`, `load_annotations`, `apply_annotations`
 - Produces: commands `docs_collect_snapshot`, `docs_load_annotations`, `docs_apply_annotations`, `docs_save_annotations`
 
-- [ ] **Step 1: Create the command module**
+- [x] **Step 1: Create the command module**
 
 `src-tauri/src/commands/docs.rs`:
 
@@ -390,7 +390,7 @@ pub async fn docs_save_annotations(
 
 The `use` lines above are correct as written — I verified them against `crates/dbx-core/src/docs/mod.rs`. `collect_snapshot`, `CollectOptions` and `SchemaSnapshot` ARE re-exported at the `docs` root; `apply_annotations` and friends are NOT, and come from `docs::annotations`.
 
-- [ ] **Step 2: Declare and register**
+- [x] **Step 2: Declare and register**
 
 Add `pub mod docs;` to `src-tauri/src/commands/mod.rs` beside its siblings. Add these four to the `generate_handler![` list at `src-tauri/src/lib.rs:1411`, matching the surrounding entries' formatting:
 
@@ -401,7 +401,7 @@ Add `pub mod docs;` to `src-tauri/src/commands/mod.rs` beside its siblings. Add 
             commands::docs::docs_save_annotations,
 ```
 
-- [ ] **Step 3: Build**
+- [x] **Step 3: Build**
 
 ```bash
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
@@ -410,7 +410,7 @@ cargo clippy -p dbx --all-targets
 ```
 Both must be clean. There are no unit tests for this task: the commands are thin adapters over Task 1's tested functions, and a test asserting a delegation reimplements the delegation.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src-tauri/src/commands/docs.rs src-tauri/src/commands/mod.rs src-tauri/src/lib.rs
@@ -428,7 +428,7 @@ git commit -m "feat(docs): add Tauri commands for docs snapshot and annotations"
 - Consumes: the same `dbx-core` functions as Task 2
 - Produces: `POST /api/docs/annotations/load`, `/api/docs/annotations/apply`, `/api/docs/annotations/save`
 
-- [ ] **Step 1: Add three handlers**
+- [x] **Step 1: Add three handlers**
 
 Append to `crates/dbx-web/src/routes/docs.rs`, matching the existing `collect_snapshot` handler's style and its `#[serde(rename_all = "camelCase")]` request structs:
 
@@ -493,7 +493,7 @@ pub async fn save_annotations(
 
 Do NOT add a `dbx-mcp` dependency to `dbx-web` — it has none, and it does not need one. `WebState` already carries `pub data_dir: PathBuf`, which is what the handlers use.
 
-- [ ] **Step 2: Register the routes**
+- [x] **Step 2: Register the routes**
 
 At `crates/dbx-web/src/main.rs:377`, beside the existing `/docs/snapshot` line:
 
@@ -503,14 +503,14 @@ At `crates/dbx-web/src/main.rs:377`, beside the existing `/docs/snapshot` line:
         .route("/docs/annotations/save", post(routes::docs::save_annotations))
 ```
 
-- [ ] **Step 3: Build**
+- [x] **Step 3: Build**
 
 ```bash
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 cargo check -p dbx-web && cargo clippy -p dbx-web --all-targets
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add crates/dbx-web/src/routes/docs.rs crates/dbx-web/src/main.rs
@@ -528,7 +528,7 @@ git commit -m "feat(docs): add web routes for annotation load, apply and save"
 **Interfaces:**
 - Produces: TS types `AnnotationFile`, `ProjectAnnotation`, `GroupAnnotation`, `TableAnnotation`, `ColumnAnnotation`; and `collectDocsSnapshot`, `loadDocsAnnotations`, `applyDocsAnnotations`, `saveDocsAnnotations` exported from `@/lib/backend/api`
 
-- [ ] **Step 1: Add the types**
+- [x] **Step 1: Add the types**
 
 Append to `apps/desktop/src/docs/types.ts`. These mirror Rust structs carrying `deny_unknown_fields`, so an extra property is a hard deserialization error on the Rust side — the shapes must match exactly.
 
@@ -571,7 +571,7 @@ export interface AnnotationFile {
 }
 ```
 
-- [ ] **Step 2: Write the failing conformance test**
+- [x] **Step 2: Write the failing conformance test**
 
 `apps/desktop/src/docs/__tests__/annotationTypes.spec.ts`:
 
@@ -613,18 +613,18 @@ describe("annotation types match the Rust structs", () => {
 });
 ```
 
-- [ ] **Step 3: Run and watch it pass**
+- [x] **Step 3: Run and watch it pass**
 
 ```bash
 pnpm vitest run apps/desktop/src/docs/__tests__/annotationTypes.spec.ts
 ```
 Expected: PASS, 5 cases. If a field set mismatches, the TypeScript above is wrong — fix the TypeScript, not the test, and report what differed.
 
-- [ ] **Step 4: Verify it bites**
+- [x] **Step 4: Verify it bites**
 
 Add `extra?: string;` to the TS `GroupAnnotation` and confirm the `GroupAnnotation` case FAILS. Restore. Report the message.
 
-- [ ] **Step 5: Add the four backend functions**
+- [x] **Step 5: Add the four backend functions**
 
 In `apps/desktop/src/lib/backend/tauri.ts`, following the file's existing `invoke` idiom:
 
@@ -700,7 +700,7 @@ export const applyDocsAnnotations = forward("applyDocsAnnotations");
 export const saveDocsAnnotations = forward("saveDocsAnnotations");
 ```
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 ```bash
 pnpm vitest run apps/desktop/src/docs
@@ -724,7 +724,7 @@ git commit -m "feat(docs): expose docs snapshot and annotations to the frontend"
 - Consumes: `AnnotationFile`, `TableAnnotation`, `GroupAnnotation` (Task 4)
 - Produces: `emptyAnnotations()`, `setProjectNote`, `setTableNote`, `setColumnNote`, `setTableGroup`, `upsertGroup`, `removeGroup` — every one `(file, ...args) => AnnotationFile`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 import { describe, expect, it } from "vitest";
@@ -815,14 +815,14 @@ describe("annotationEdits", () => {
 });
 ```
 
-- [ ] **Step 2: Run and watch it fail**
+- [x] **Step 2: Run and watch it fail**
 
 ```bash
 pnpm vitest run apps/desktop/src/docs/__tests__/annotationEdits.spec.ts
 ```
 Expected: FAIL — cannot resolve `../annotationEdits`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```ts
 import type { AnnotationFile, GroupAnnotation, TableAnnotation } from "./types";
@@ -931,20 +931,20 @@ export function setProjectNote(file: AnnotationFile, note: string): AnnotationFi
 }
 ```
 
-- [ ] **Step 4: Run and watch it pass**
+- [x] **Step 4: Run and watch it pass**
 
 ```bash
 pnpm vitest run apps/desktop/src/docs/__tests__/annotationEdits.spec.ts
 ```
 
-- [ ] **Step 5: Verify two guards bite**
+- [x] **Step 5: Verify two guards bite**
 
 One at a time, restoring between each. Report both failure messages.
 
 1. In `removeGroup`, delete the loop that clears table references → `removing a group also clears every table that referenced it` must fail.
 2. In `pruneTable`, drop the `entry.group === undefined` condition → `keeps a table entry when it still carries a group after the note clears` must fail.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 pnpm exec vue-tsc --noEmit --project apps/desktop/tsconfig.json
@@ -977,7 +977,7 @@ structural change scoped entirely to the new namespace; the existing 315 KB of k
 **Interfaces:**
 - Produces: `describeWarning(warning: SnapshotWarning, translate: Translate): WarningNotice` — the existing return type, unchanged — where `type Translate = (key: string, params?: Record<string, string | number>) => string`
 
-- [ ] **Step 1: Write the failing parity test**
+- [x] **Step 1: Write the failing parity test**
 
 ```ts
 import { describe, expect, it } from "vitest";
@@ -1029,14 +1029,14 @@ describe("docs i18n namespace parity", () => {
 });
 ```
 
-- [ ] **Step 2: Run and watch it fail**
+- [x] **Step 2: Run and watch it fail**
 
 ```bash
 pnpm vitest run apps/desktop/src/i18n/__tests__/docsNamespaceParity.spec.ts
 ```
 Expected: FAIL — no locale declares `docs`, so `leafKeys(undefined)` yields `[""]` and the English assertion fails first.
 
-- [ ] **Step 3: Create `apps/desktop/src/i18n/locales/docs/en.ts`**
+- [x] **Step 3: Create `apps/desktop/src/i18n/locales/docs/en.ts`**
 
 ```ts
 export default {
@@ -1082,27 +1082,27 @@ import docs from "./docs/en";
   docs,
 ```
 
-- [ ] **Step 4: Translate into the other 7 locales**
+- [x] **Step 4: Translate into the other 7 locales**
 
 Create `locales/docs/{es,it,ja,ko,pt-BR,zh-CN,zh-TW}.ts` with the same key structure and translated
 values, and wire each into its locale file the same way (`import docs from "./docs/ja";` … `docs,`). Keep every interpolation placeholder (`{table}`, `{engine}`, `{count}`, `{reason}`, `{item}`, `{comment}`, `{error}`) exactly as written — a translated placeholder name renders literally.
 
 Keep technical terms in English where a developer would say them in English: for `pt-BR` that means "schema", "commit", "cache", "index" stay English while "banco de dados", "arquivo", "fila" are Portuguese.
 
-- [ ] **Step 5: Run the parity test**
+- [x] **Step 5: Run the parity test**
 
 ```bash
 pnpm vitest run apps/desktop/src/i18n/__tests__/docsNamespaceParity.spec.ts
 ```
 Expected: PASS, 8 cases.
 
-- [ ] **Step 6: Verify it bites**
+- [x] **Step 6: Verify it bites**
 
 Delete one key from `locales/docs/ja.ts` and confirm the `ja` case FAILS naming that key. Restore. Report the message.
 
 Then verify the test could not have been vacuous: temporarily point the imports at `../locales/<name>` instead of `../locales/docs/<name>`, delete a key from `locales/docs/ja.ts` again, and confirm the test now PASSES despite the missing key — that is the trap this structure exists to avoid. Restore both. Report what you saw.
 
-- [ ] **Step 7: Change `describeWarning` to take a translator**
+- [x] **Step 7: Change `describeWarning` to take a translator**
 
 `docsWarnings.ts` currently returns hardcoded English. Change its signature so `src/docs/` never imports vue-i18n — `useI18n()` throws without a provided instance, which is exactly the Part 3c export case:
 
@@ -1122,7 +1122,7 @@ export function describeWarning(warning: SnapshotWarning, translate: Translate):
 
 Update `docsWarnings.spec.ts` to pass a fake translator that returns `` `${key}:${JSON.stringify(params)}` ``, and assert on that rather than on English prose. The tests then check the key and params, which is what actually matters now.
 
-- [ ] **Step 8: Verify and commit**
+- [x] **Step 8: Verify and commit**
 
 ```bash
 pnpm vitest run apps/desktop/src/docs apps/desktop/src/i18n
@@ -1143,7 +1143,7 @@ git commit -m "feat(docs): add the docs i18n namespace with a parity guard"
 - Consumes: `renderNote` (Part 3a), `groupStyle` (Part 3a), `GroupAnnotation` (Task 4)
 - Produces: `NoteEditor` (`modelValue: string`, `readonly: boolean`, emits `update:modelValue`), `GroupEditor` (`group: GroupAnnotation`, emits `update:group`, `delete`), `GroupPicker` (`groups: GroupAnnotation[]`, `modelValue: string | null`, emits `update:modelValue`, `create`)
 
-- [ ] **Step 1: Extend the contract test**
+- [x] **Step 1: Extend the contract test**
 
 In `componentContract.spec.ts`, update `EXPECTED` to include the three new files, and add:
 
@@ -1160,14 +1160,14 @@ In `componentContract.spec.ts`, update `EXPECTED` to include the three new files
   });
 ```
 
-- [ ] **Step 2: Run and watch it fail**
+- [x] **Step 2: Run and watch it fail**
 
 ```bash
 pnpm vitest run apps/desktop/src/docs/__tests__/componentContract.spec.ts
 ```
 Expected: FAIL on the file list — the three components do not exist.
 
-- [ ] **Step 3: Build the three components**
+- [x] **Step 3: Build the three components**
 
 `NoteEditor.vue` — renders `renderNote` output until clicked, then a raw markdown textarea. The `v-html` must bind `renderNote(...)`; the contract test enforces it in either quote style. When `readonly` is true it never becomes editable.
 
@@ -1192,17 +1192,17 @@ hue rather than a colour.
 
 All three: `<script setup lang="ts">`, Tailwind with DBX token names (`bg-background`, `text-foreground`, `border-border`, `text-muted-foreground`), no store or backend imports, all strings via a `translate` prop or `t` passed from the parent — never `useI18n()` inside `src/docs/`.
 
-- [ ] **Step 4: Run the contract test**
+- [x] **Step 4: Run the contract test**
 
 ```bash
 pnpm vitest run apps/desktop/src/docs
 ```
 
-- [ ] **Step 5: Verify the v-html guard still bites on the new file**
+- [x] **Step 5: Verify the v-html guard still bites on the new file**
 
 Change `NoteEditor.vue`'s `v-html="renderNote(modelValue)"` to `v-html='modelValue'` (single quotes, raw value) and confirm the contract test FAILS. Restore. Report the message. This is the single most dangerous thing a template here can do — a database `COMMENT ON` value going straight to the DOM.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 pnpm exec vue-tsc --noEmit --project apps/desktop/tsconfig.json
@@ -1223,7 +1223,7 @@ git commit -m "feat(docs): add note editor, group editor and group picker"
 **Interfaces:**
 - Produces: `columnsUsingEnum(snapshot: SchemaSnapshot, enumName: string): Array<{ tableKey: string; table: string; column: string }>`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `docsIndex.spec.ts`:
 
@@ -1291,14 +1291,14 @@ Add to `docsIndex.spec.ts`:
 
 Import `DocTable` and `SchemaSnapshot` as types if the spec file does not already. The `ColumnInfo` field list above is the full required set the conformance test pins — omitting one is a type error.
 
-- [ ] **Step 2: Run and watch it fail**
+- [ ] **Step 2: Run and watch it fail**  <!-- not performed: columnsUsingEnum was already implemented and committed before this step was reached, so the failure was never observed. The exact-match guard was instead verified by Step 5. -->
 
 ```bash
 pnpm vitest run apps/desktop/src/docs/__tests__/docsIndex.spec.ts
 ```
 Expected: FAIL — `columnsUsingEnum` is not exported.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```ts
 /**
@@ -1356,15 +1356,15 @@ Note `docsIndex.ts` does NOT contain a copy — it groups by `table.schema ?? ""
 This extraction is in scope deliberately: Part 3a's final review flagged the duplication as a
 Minor and it was deferred, and this task is the moment a new consumer appears.
 
-- [ ] **Step 4: Run and watch it pass, then build `EnumPage.vue`**
+- [x] **Step 4: Run and watch it pass, then build `EnumPage.vue`**
 
 A thin template: the enum's qualified name, its values, its note via `NoteEditor`, and the `columnsUsingEnum` list with each entry clickable to that table. Add it to `EXPECTED` in the contract test.
 
-- [ ] **Step 5: Verify it bites**
+- [x] **Step 5: Verify it bites**
 
 Change `column.data_type === enumName` to `column.data_type.includes(enumName)` and confirm `returns nothing for an enum no column references` FAILS. Restore. Report the message.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 pnpm vitest run apps/desktop/src/docs
@@ -1388,7 +1388,7 @@ git commit -m "feat(docs): add the enum page and its reverse column lookup"
 made `describeWarning` take a translator). You are ADDING `annotations` and `readonly` to the
 existing `defineProps`, not writing it from scratch. `readonly` is the only optional one.
 
-- [ ] **Step 1: Define the edit payload**
+- [x] **Step 1: Define the edit payload**
 
 In `apps/desktop/src/docs/types.ts`:
 
@@ -1407,7 +1407,7 @@ export type DocsEdit =
   | { kind: "removeGroup"; groupId: string };
 ```
 
-- [ ] **Step 2: Add the contract test**
+- [x] **Step 2: Add the contract test**
 
 ```ts
   it("the viewer emits edits rather than persisting them", () => {
@@ -1424,13 +1424,13 @@ export type DocsEdit =
   });
 ```
 
-- [ ] **Step 3: Thread `readonly` and `annotations` down; emit `edit` up**
+- [x] **Step 3: Thread `readonly` and `annotations` down; emit `edit` up**
 
 `translate` is already threaded to `WarningBanner`; extend the same pattern to the other components as they gain strings.
 
 `DocsApp` gains the props and re-emits `edit` from its children. Each component renders a `NoteEditor` where a note belongs and emits the matching `DocsEdit`. When `readonly` is true, no editor is interactive and `GroupEditor` / `GroupPicker` are not rendered.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 pnpm vitest run apps/desktop/src/docs
@@ -1456,7 +1456,7 @@ git commit -m "feat(docs): thread editing through the viewer as emitted events"
 - Consumes: everything above
 - Produces: `createAutosave(save, delayMs)` returning `{ schedule(file), status, flush() }`
 
-- [ ] **Step 1: Write the failing autosave tests**
+- [x] **Step 1: Write the failing autosave tests**
 
 Autosave logic goes in a `.ts` file so it is testable without mounting anything:
 
@@ -1539,14 +1539,14 @@ describe("createAutosave", () => {
 });
 ```
 
-- [ ] **Step 2: Run and watch it fail**
+- [x] **Step 2: Run and watch it fail**
 
 ```bash
 pnpm vitest run apps/desktop/src/components/docs/__tests__/docsAutosave.spec.ts
 ```
 Expected: FAIL — cannot resolve `../docsAutosave`.
 
-- [ ] **Step 3: Implement `docsAutosave.ts`**
+- [x] **Step 3: Implement `docsAutosave.ts`**
 
 ```ts
 import { ref, type Ref } from "vue";
@@ -1638,9 +1638,9 @@ export function createAutosave(save: (file: AnnotationFile) => Promise<void>, de
 }
 ```
 
-- [ ] **Step 4: Run and watch it pass**
+- [x] **Step 4: Run and watch it pass**
 
-- [ ] **Step 5: Build the dialog**
+- [x] **Step 5: Build the dialog**
 
 **The dialog shell, matching `SchemaDiagramDialog.vue` — the closest comparable feature:**
 
@@ -1696,7 +1696,7 @@ dimensions.
 
 On an `edit` event from `DocsApp`: apply the matching `annotationEdits` function, `schedule` the autosave, and call `applyDocsAnnotations` to refresh the display. Show the save status. Call `flush()` before closing. Use `useI18n()` HERE — the dialog is outside `src/docs/` — and pass `t` down as the `translate` prop. Add a button opening the existing schema diagram via `connectionStore.diagramSource`.
 
-- [ ] **Step 6: Wire the trigger**
+- [x] **Step 6: Wire the trigger**
 
 The schema diagram uses this exact five-point wiring. Mirror it — I verified every location:
 
@@ -1727,14 +1727,14 @@ entry either, and the docs dialog takes exactly the prefills ObjectBrowser alrea
 (connection, database, schema). If a tree-level entry is wanted later it is one more call site
 setting the same `docsSource`.
 
-- [ ] **Step 7: Verify two guards bite**
+- [x] **Step 7: Verify two guards bite**
 
 One at a time, restoring between each. Report both failure messages.
 
 1. Make the `catch` in `write()` swallow its error (`catch { pending = undefined; }`) → `surfaces a failure instead of swallowing it` must fail.
 2. Delete the `inFlight` guard at the top of `write()` → `never runs two saves concurrently` must fail.
 
-- [ ] **Step 8: Full verification and commit**
+- [x] **Step 8: Full verification and commit**
 
 ```bash
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
