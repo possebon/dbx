@@ -38,6 +38,20 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm --filter dbx... install --frozen-lockfile
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      # exportSmoke.spec.ts shells out to this example to build a real
+      # to_standalone_html fixture. Built here, before `pnpm check`, so the
+      # test's own `cargo run` (same flags — see the spec's comment) is a
+      # cache hit rather than a fresh compile of dbx-core inside a vitest
+      # hook. `--no-default-features`: the docs module needs none of
+      # duckdb-sidecar, mq-admin, sqlite-sqlcipher or system-fonts, so this
+      # avoids requiring any system dev packages this job doesn't already
+      # install.
+      - name: Build the docs export smoke fixture example
+        run: cargo build -p dbx-core --locked --no-default-features --example docs_export_smoke
+
       - name: Frontend check
         run: pnpm check
 
