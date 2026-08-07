@@ -114,6 +114,28 @@ jobs:
       - name: Frontend check
         run: pnpm check
 
+      # Advisory, not a guard: the manifest guard above hashes INPUTS, so it
+      # cannot see a hand-edited artefact (no source hash moves) or a
+      # toolchain bump (vite, tailwindcss and @vitejs/plugin-vue are
+      # plugins, not modules — they never enter the graph). Rebuilding and
+      # diffing checks the relationship between inputs and output instead,
+      # closing both gaps. Must run last: it overwrites the committed
+      # bundle, and both the guard above and `pnpm check` above (whose
+      # exportSmoke.spec.ts executes the *committed* bundle) need it
+      # untouched to be testing what is actually checked in.
+      - name: Rebuild the docs export bundle
+        run: pnpm build:docs-export
+
+      # continue-on-error for one cycle: every reproducibility observation
+      # so far was same-platform, and this job is ubuntu-22.04 x86_64 like
+      # every contributor's toolchain is lockfile-pinned to expect. If a
+      # byte ever differs cross-platform, surface it in the job summary
+      # rather than reddening every PR at once on a repo we contribute to,
+      # not maintain.
+      - name: Report any docs export bundle drift
+        run: git diff --exit-code -- crates/dbx-core/assets/
+        continue-on-error: true
+
   github-scripts:
     needs: changes
     if: needs.changes.outputs.github_scripts == 'true'
