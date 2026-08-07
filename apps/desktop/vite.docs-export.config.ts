@@ -116,6 +116,13 @@ function exportBundlePlugin() {
       }
       for (const file of stylesheets) record(file);
       record(fontPath);
+      // This file, and the tsconfig esbuild reads `target` out of. Neither is a
+      // module, and both decide emitted bytes: the @font-face template below,
+      // `format: "iife"`, the `@source` narrowing. Without them someone can
+      // change how the bundle is built, not rebuild, and leave the staleness
+      // guard green over artefacts that no longer match the tree.
+      record(__filename);
+      record(path.join(__dirname, "tsconfig.json"));
 
       for (const [name, chunk] of Object.entries(bundle)) {
         if (name.endsWith(".css") && typeof chunk.source === "string") chunk.source = fontFace + chunk.source;

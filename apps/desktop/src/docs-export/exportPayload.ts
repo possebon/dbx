@@ -17,3 +17,21 @@ export interface ExportPayload {
   annotations: AnnotationFile;
   lang: ExportLocale;
 }
+
+/**
+ * Read the snapshot the exporter embedded in the document.
+ *
+ * This lives here rather than in `main.ts` so a spec can call it: importing
+ * `main.ts` mounts the application as a side effect. It is the whole of the
+ * contract with Task 6's Rust side, and the only thing in the emitted document
+ * the bundle reads.
+ */
+export function readPayload(): ExportPayload {
+  const node = document.querySelector("script[type='application/dbx-snapshot']");
+  if (node === null) throw new Error("no <script type='application/dbx-snapshot'> in this document");
+  // `atob` yields one byte per character; the payload is UTF-8, so it must be
+  // widened before decoding or every non-ASCII table name and note is mangled.
+  const binary = atob((node.textContent ?? "").trim());
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  return JSON.parse(new TextDecoder().decode(bytes)) as ExportPayload;
+}
