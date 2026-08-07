@@ -122,17 +122,32 @@ mod tests {
         // 1. Every `url(...)` in the emitted stylesheet must be a `data:`
         //    URI — an allowlist of the one legitimate scheme, not a
         //    blocklist of bad ones, so a new absolute font or image url()
-        //    fails without anyone having to extend a list.
+        //    fails without anyone having to extend a list. The match is
+        //    case-insensitive because CSS's `url()` function name is
+        //    case-insensitive per spec (`URL(...)` is legal); an ASCII-only
+        //    bundle makes a byte-wise check safe here.
+        fn find_url_ci(s: &str, from: usize) -> Option<usize> {
+            let bytes = s.as_bytes();
+            (from..bytes.len().saturating_sub(3)).find(|&i| bytes[i..i + 4].eq_ignore_ascii_case(b"url("))
+        }
+
         let style_start = html.find("<style>").expect("style element") + "<style>".len();
         let style_end = html.find("</style>").expect("style element closes");
-        let mut rest = &html[style_start..style_end];
-        while let Some(pos) = rest.find("url(") {
-            rest = &rest[pos + "url(".len()..];
+        let style = &html[style_start..style_end];
+        let mut cursor = 0;
+        let mut url_count = 0;
+        while let Some(pos) = find_url_ci(style, cursor) {
+            let rest = &style[pos + "url(".len()..];
             let end = rest.find(')').expect("unterminated url(");
             let value = rest[..end].trim().trim_matches('\'').trim_matches('"');
             assert!(value.starts_with("data:"), "stylesheet references a non-data url(): {value}");
-            rest = &rest[end + 1..];
+            url_count += 1;
+            cursor = pos + "url(".len() + end + 1;
         }
+        // A scan that finds nothing hasn't verified anything — today the
+        // font is inlined via exactly one `url()`, so zero would mean the
+        // build stopped inlining it, not that there is nothing left to check.
+        assert!(url_count >= 1, "found no url(...) in the stylesheet — the scan above verified nothing");
 
         // 2. The hand-authored shell — the document with the bundle's own
         //    CSS, JS, and the base64 payload removed — must contain no
@@ -153,5 +168,72 @@ mod tests {
         let error = to_standalone_html(&snapshot, &annotations, "kl").expect_err("should reject");
         assert!(error.contains("kl"), "got: {error}");
         assert!(error.contains("en"), "the error must list the valid locales, got: {error}");
+    }
+
+    /// The committed bundle must match the sources it was built from.
+    ///
+    /// Skips only when the crate is consumed from a published package, where
+    /// `apps/desktop/` does not exist. That skip is itself a hazard — a
+    /// vacuous skip in CI would silently disable this guard — so it keys off
+    /// a repository-only marker rather than off the absence of the sources.
+    #[test]
+    fn docs_export_bundle_is_current() {
+        use sha2::{Digest, Sha256};
+
+        let workspace =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("workspace root");
+        if !workspace.join("pnpm-workspace.yaml").exists() {
+            return; // packaged crate: the sources are genuinely absent
+        }
+
+        let manifest: serde_json::Value = serde_json::from_str(include_str!("../../assets/docs-export.manifest.json"))
+            .expect("manifest is valid JSON");
+        let sources = manifest["sources"].as_object().expect("manifest.sources");
+        assert!(sources.len() > 5, "manifest lists only {} sources — the build emitted an empty graph", sources.len());
+
+        let mut stale = Vec::new();
+        for (relative, expected) in sources {
+            let path = workspace.join(relative);
+            let Ok(bytes) = std::fs::read(&path) else {
+                stale.push(format!("{relative} (missing)"));
+                continue;
+            };
+            let actual = format!("{:x}", Sha256::digest(&bytes));
+            if actual != expected.as_str().unwrap_or_default() {
+                stale.push(relative.clone());
+            }
+        }
+
+        assert!(
+            stale.is_empty(),
+            "the committed docs export bundle is stale.\nChanged: {}\nRun: pnpm build:docs-export",
+            stale.join(", ")
+        );
+    }
+
+    /// Tailwind v4 generates utility classes like `bg-background` from the
+    /// `--color-*` entries inside an `@theme` block (in `tokens.css`), not
+    /// from raw custom properties. If that block were lost, the build would
+    /// still succeed and emit a stylesheet — just one with no utilities in
+    /// it — and the export would render completely unstyled while every
+    /// other test here passed. Nothing else in this file guards it.
+    #[test]
+    fn the_stylesheet_carries_resolved_utilities() {
+        assert!(
+            EXPORT_CSS.contains(".bg-background{background-color:var("),
+            "the stylesheet is missing a resolved `.bg-background` utility — \
+             `@theme` in tokens.css may have been lost, or the token it \
+             resolves through is gone"
+        );
+
+        // `@custom-variant dark` — its failure is invisible in light mode,
+        // where the export would look correct right up until dark mode
+        // shipped unstyled.
+        assert!(
+            EXPORT_CSS.contains(":is(.dark *)"),
+            "the stylesheet has no `:is(.dark *)` selector — the dark variant \
+             may have been lost; this would ship undetected because light \
+             mode looks fine"
+        );
     }
 }
