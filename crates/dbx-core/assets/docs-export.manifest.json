@@ -1,12 +1,12 @@
 {
   "sources": {
     "apps/desktop/public/fonts/geist-latin-wght-normal.woff2": "19f9c92546aa300c312235e3125af1b81394d8db9a4bc4a425cd5b641d2d54e1",
-    "apps/desktop/src/docs-export/ExportApp.vue": "d552a1e52f7088451b3ee888a71d0116f4cd12692c1bb7367b9996f988a7c317",
+    "apps/desktop/src/docs-export/ExportApp.vue": "499ba5beb89cc411ef32f92d9aaff356a43663f5f455a0a168bb3ade86dd143c",
     "apps/desktop/src/docs-export/export.css": "c96e413fb305e7b06932248d6f03e68ad05928954dc89bac075a79a6d4cf4a9d",
     "apps/desktop/src/docs-export/exportPayload.ts": "d2355903843aa8a2e37b83827de9c4df2187d6df92fd514e3ab2fd89390e4b6c",
     "apps/desktop/src/docs-export/exportTranslate.ts": "2e01bf9ad20fb38f3dfab96769ed87c44a24e5eb8d0aa352f4b398606fb77e3b",
     "apps/desktop/src/docs-export/main.ts": "08c541f19fa6e368ea42fd096320da4312624f1961cd2b59387aa618288fc397",
-    "apps/desktop/src/docs/DocsApp.vue": "0199d0a0446303a2f01c5e8cbd00cea9182f9ea58feb136d354300f41fe81a35",
+    "apps/desktop/src/docs/DocsApp.vue": "60fa8c3f434efb39622688f8ad65dcad77eedd99bde9ffb9103d711519aa29d3",
     "apps/desktop/src/docs/components/ColumnTable.vue": "a3e40f27e2d20f46c16b8b5b4f5cb83037ebb35ee667563a351dbe0a41e2f745",
     "apps/desktop/src/docs/components/DocsSearch.vue": "163d585dc3400b30d7ff37b4efec7ce646933699131e11e4120979b2d3286c78",
     "apps/desktop/src/docs/components/DocsSidebar.vue": "cf4a394b9b1ceff18e463c3ba5366921b61033d6ccf530373a9b300b23f0baf8",
@@ -15,7 +15,7 @@
     "apps/desktop/src/docs/components/GroupPicker.vue": "2bf6066c3574935402b0acc9f50a6580b1fb256b94bac960bafb183fd77a0c98",
     "apps/desktop/src/docs/components/NoteEditor.vue": "ab905e106734bd27e46bfb306c168d624e3f0eba9bd878975f738c69eb50d394",
     "apps/desktop/src/docs/components/RelationshipList.vue": "bc9d074aa942c878405f19dd49cea8f7aa492bbcde7fffa0c93e2a51dad0abf7",
-    "apps/desktop/src/docs/components/SchemaDiagram.vue": "e7fb4ad2e572143e5f4c1778fafba0d6d74fe26779bd9e8b6f59cd9bd2d692cc",
+    "apps/desktop/src/docs/components/SchemaDiagram.vue": "5942d6d86bf56efeabcd9e0aee2179515778a067760d4bb7a71e09b694deefef",
     "apps/desktop/src/docs/components/TablePage.vue": "48b3fb848c2bede191b5ff04379c24b5088b49ea53e7b7be853ba904ad6cd371",
     "apps/desktop/src/docs/components/WarningBanner.vue": "5b9ea68de1c7221cee9c5a5af6488316902fcc5c3a2bbce5d69e0ab767c1b059",
     "apps/desktop/src/docs/components/WikiIndex.vue": "eea6724bc705b98969eceb56852928cede06ca8b32c0b125f425eec2c57bd7e6",

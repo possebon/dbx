@@ -43,6 +43,18 @@ watch(
   { immediate: true },
 );
 
+// export.rs sets `<html lang>` correctly at export time, but that is a
+// snapshot of the moment the file was generated — nothing here kept it in
+// sync with the reader's own choice. Without this, switching languages left
+// screen readers and hyphenation reading the export-time locale forever.
+watch(
+  lang,
+  (value) => {
+    document.documentElement.lang = value;
+  },
+  { immediate: true },
+);
+
 const route = ref<DocsRoute>(parseDocsHash(location.hash, props.payload.snapshot, true));
 
 // The URL is the source of truth, so Back and Forward work and a link to a

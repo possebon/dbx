@@ -92,8 +92,13 @@ function domTextOf(file: string): { staticText: string; interpolations: string[]
 
   // Whatever sits between a tag's closing `>` and the next `<` is DOM text;
   // whatever sits before that `>`, inside the tag itself, is an attribute
-  // and never renders as visible text — so this intentionally never looks
-  // there.
+  // and mostly doesn't render as visible text — so this intentionally
+  // doesn't look there on purpose. "Mostly" because the split is a regex,
+  // not a parser: an attribute value containing a bare `>` (a comparison
+  // like `v-if="count > 0"`) ends the match early and leaks the tail of
+  // that attribute into a segment. That leak runs in the safe direction —
+  // it can only add text to scan, never drop real display text — so the
+  // risk is a false positive below, never a missed literal.
   const segments: string[] = [];
   for (const match of withoutInterpolations.matchAll(/>([^<]*)</g)) {
     segments.push(match[1]);
@@ -111,6 +116,13 @@ function domTextOf(file: string): { staticText: string; interpolations: string[]
  * last round. `ts.isLiteralTypeNode` is TypeScript's own distinction
  * between the two, not a hand-picked exception — the same check the
  * compiler itself uses to know it is looking at a type, not a value.
+ *
+ * Unlike domTextOf's split of display-vs-comparison text, this collects
+ * every value-position literal with no such distinction — a literal used
+ * only in a comparison (`type === "LOCAL"`) is indistinguishable here from
+ * one that reaches a template as display text. Accepted as this scan's
+ * blind spot rather than chased, for the same reason: the risk is a false
+ * positive, not a missed literal.
  */
 function valueStringLiteralsOf(file: string): string[] {
   const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
