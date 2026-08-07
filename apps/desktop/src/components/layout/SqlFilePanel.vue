@@ -12,6 +12,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { resolveExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import { externalSqlFileOpenErrorMessage, formatSqlFileSize, isExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
@@ -207,11 +208,12 @@ function collectDirPaths(entries: SqlFileEntry[], into: Set<string>) {
 async function openFile(path: string) {
   if (!isTauriRuntime()) return;
   try {
-    const content = await api.readExternalSqlFile(path);
+    const snapshot = await api.readExternalSqlFileSnapshot(path);
     const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
     const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
     const database = connection ? resolveDefaultDatabase(connection, []) : "";
-    queryStore.openExternalSqlFile(connectionId, database, path, content);
+    const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), { connectionId, database });
+    queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version);
   } catch (e: any) {
     if (isExternalSqlFileTooLargeError(e)) {
       executeFile(path);

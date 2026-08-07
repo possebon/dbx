@@ -306,9 +306,12 @@ fn linux_selected_drm_render_device<'a>(
     devices.iter().find(|device| device.boot_vga).or_else(|| devices.first())
 }
 
-#[cfg(target_os = "linux")]
-fn linux_drm_render_devices() -> Vec<LinuxDrmRenderDevice> {
-    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_drm_render_devices_from_paths(
+    sys_class_drm: &std::path::Path,
+    dev_dri: &std::path::Path,
+) -> Vec<LinuxDrmRenderDevice> {
+    let Ok(entries) = std::fs::read_dir(sys_class_drm) else {
         return Vec::new();
     };
     let mut devices = entries
@@ -320,20 +323,49 @@ fn linux_drm_render_devices() -> Vec<LinuxDrmRenderDevice> {
             if render_index.is_empty() || !render_index.bytes().all(|byte| byte.is_ascii_digit()) {
                 return None;
             }
+            let device_file = dev_dri.join(node_name);
+            if std::fs::OpenOptions::new().read(true).write(true).open(&device_file).is_err() {
+                return None;
+            }
             let device_path = entry.path().join("device");
             let driver = std::fs::read_link(device_path.join("driver"))
                 .ok()
                 .and_then(|path| path.file_name().and_then(std::ffi::OsStr::to_str).map(str::to_ascii_lowercase));
             let boot_vga = std::fs::read_to_string(device_path.join("boot_vga")).is_ok_and(|value| value.trim() == "1");
-            Some(LinuxDrmRenderDevice {
-                device_file: std::path::Path::new("/dev/dri").join(node_name),
-                driver,
-                boot_vga,
-            })
+            Some(LinuxDrmRenderDevice { device_file, driver, boot_vga })
         })
         .collect::<Vec<_>>();
     devices.sort_by(|left, right| left.device_file.cmp(&right.device_file));
     devices
+}
+
+#[cfg(target_os = "linux")]
+fn linux_drm_render_devices() -> Vec<LinuxDrmRenderDevice> {
+    linux_drm_render_devices_from_paths(std::path::Path::new("/sys/class/drm"), std::path::Path::new("/dev/dri"))
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const LINUX_SOFTWARE_ONLY_DRM_DRIVERS: &[&str] = &[
+    "virtio-pci", // QEMU/KVM virtio-gpu: 2D dumb-buffer only, GL falls back to llvmpipe
+    "virtio_gpu", // virtio-gpu on virtio-mmio/platform buses
+    "qxl",        // QEMU/SPICE 2D display adapter
+    "bochs",      // QEMU/BOCHS VGA (2D only)
+    "cirrus",     // legacy Cirrus VGA (2D only)
+    "vmwgfx",     // VMware SVGA
+    "vboxvideo",  // VirtualBox graphics
+    "xen",        // Xen virtual GPU
+    "udl",        // DisplayLink 2D framebuffer
+    "mgag200",    // Matrox server BMC
+    "ast",        // ASPEED server BMC
+    "hibmc",      // Huawei HiBMC server BMC
+];
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_drm_driver_is_software_only(driver: Option<&str>) -> bool {
+    // 2D-only/virtual drivers leave GL rendering to llvmpipe, where WebKitGTK's
+    // DMABuf compositing drives the gallivm LLVM JIT that can fail to
+    // materialize compositing shaders (blank window on GPU-less VMs).
+    driver.is_none_or(|driver| LINUX_SOFTWARE_ONLY_DRM_DRIVERS.contains(&driver))
 }
 
 #[cfg(target_os = "linux")]
@@ -354,7 +386,10 @@ fn linux_nvidia_driver() -> LinuxNvidiaDriver {
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_webkit_rendering_workarounds(driver: LinuxNvidiaDriver) -> &'static [(&'static str, &'static str)] {
+fn linux_webkit_rendering_workarounds(
+    driver: LinuxNvidiaDriver,
+    has_hardware_render_device: bool,
+) -> &'static [(&'static str, &'static str)] {
     match driver {
         LinuxNvidiaDriver::Proprietary => {
             // NVIDIA's proprietary driver needs both DMABuf and explicit-sync
@@ -364,6 +399,14 @@ fn linux_webkit_rendering_workarounds(driver: LinuxNvidiaDriver) -> &'static [(&
         LinuxNvidiaDriver::Nouveau => {
             // WebKitGTK's DMABuf renderer can produce a fully black WebView on
             // Nouveau while the DOM remains interactive.
+            &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
+        }
+        LinuxNvidiaDriver::None if !has_hardware_render_device => {
+            // No hardware render device means Mesa can only render through
+            // llvmpipe. WebKitGTK's DMABuf compositing then drives llvmpipe's
+            // gallivm LLVM JIT, which can fail to materialize the compositing
+            // shaders (blank/white window on GPU-less VMs and servers), so
+            // disable the DMABuf renderer there as well.
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
         }
         LinuxNvidiaDriver::None => {
@@ -430,7 +473,10 @@ fn linux_appimage_system_gtk_immodules_cache(
 
 #[cfg(target_os = "linux")]
 fn apply_linux_webkit_rendering_workarounds() {
-    for (key, value) in linux_webkit_rendering_workarounds(linux_nvidia_driver()) {
+    let render_devices = linux_drm_render_devices();
+    let has_hardware_render_device =
+        render_devices.iter().any(|device| !linux_drm_driver_is_software_only(device.driver.as_deref()));
+    for (key, value) in linux_webkit_rendering_workarounds(linux_nvidia_driver(), has_hardware_render_device) {
         if std::env::var_os(key).is_none() {
             std::env::set_var(key, value);
         }
@@ -456,11 +502,34 @@ fn apply_linux_webkit_rendering_workarounds() {
     }
 }
 
-fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+/// Brings the main window to the foreground, reporting whether it ended up visible.
+///
+/// The individual calls used to be discarded with `let _ =`, which made a failed
+/// reveal completely silent. That matters on macOS: an instance that has lost its
+/// WindowServer connection stays alive and idle but can no longer present a window
+/// or a tray icon, and the single-instance guard keeps handing later launches to it,
+/// so the app looks like it simply does not start. Logging here is what makes that
+/// state diagnosable at all.
+fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Some(window) = app.get_webview_window("main") else {
+        eprintln!("[WINDOW] show_main_window: no \"main\" webview window to reveal");
+        return false;
+    };
+    if let Err(err) = window.show() {
+        eprintln!("[WINDOW] show_main_window: show() failed: {err}");
+    }
+    if let Err(err) = window.unminimize() {
+        eprintln!("[WINDOW] show_main_window: unminimize() failed: {err}");
+    }
+    if let Err(err) = window.set_focus() {
+        eprintln!("[WINDOW] show_main_window: set_focus() failed: {err}");
+    }
+    match window.is_visible() {
+        Ok(visible) => visible,
+        Err(err) => {
+            eprintln!("[WINDOW] show_main_window: is_visible() failed: {err}");
+            false
+        }
     }
 }
 
@@ -716,7 +785,9 @@ fn setup_desktop_tray<R: tauri::Runtime, M: Manager<R>>(
     })
     .on_tray_icon_event(|tray, event| match event {
         TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. }
-        | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => show_main_window(tray.app_handle()),
+        | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => {
+            show_main_window(tray.app_handle());
+        }
         _ => {}
     })
     .build(manager)?;
@@ -830,7 +901,8 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
 mod tests {
     use super::{
         app_menu_copy_support_info_label, app_menu_quit_label, linux_appimage_system_gtk_immodules_cache,
-        linux_appimage_wayland_backend_override, linux_nvidia_driver_from_state, linux_selected_drm_render_device,
+        linux_appimage_wayland_backend_override, linux_drm_driver_is_software_only,
+        linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state, linux_selected_drm_render_device,
         linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
         should_enable_single_instance, should_fallback_to_native_quit, should_hide_window_on_close,
         should_setup_desktop_tray, should_show_main_window_after_setup, should_show_main_window_before_setup_tasks,
@@ -1002,6 +1074,25 @@ mod tests {
     }
 
     #[test]
+    fn discovers_only_usable_linux_drm_render_device_files() {
+        let root = std::env::temp_dir().join(format!("dbx-drm-render-devices-{}", uuid::Uuid::new_v4()));
+        let sys_class_drm = root.join("sys/class/drm");
+        let dev_dri = root.join("dev/dri");
+        std::fs::create_dir_all(sys_class_drm.join("renderD128/device")).unwrap();
+        std::fs::create_dir_all(sys_class_drm.join("renderD129/device")).unwrap();
+        std::fs::create_dir_all(&dev_dri).unwrap();
+
+        assert!(linux_drm_render_devices_from_paths(&sys_class_drm, &dev_dri).is_empty());
+
+        std::fs::write(dev_dri.join("renderD129"), []).unwrap();
+        let devices = linux_drm_render_devices_from_paths(&sys_class_drm, &dev_dri);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_file, dev_dri.join("renderD129"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn keeps_linux_dmabuf_when_nouveau_is_loaded_but_not_the_default_renderer() {
         let devices = [
             drm_render_device("/dev/dri/renderD128", "i915", true),
@@ -1054,14 +1145,33 @@ mod tests {
     #[test]
     fn applies_driver_specific_linux_webkit_rendering_workarounds() {
         assert_eq!(
-            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Proprietary),
+            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Proprietary, true),
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
         );
         assert_eq!(
-            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Nouveau),
+            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Nouveau, true),
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
         );
-        assert_eq!(linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None), &[]);
+        assert_eq!(linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None, true), &[]);
+        // Without any hardware render device (GPU-less VM / server) Mesa falls
+        // back to llvmpipe, whose DMABuf compositing path can crash the WebKit
+        // process.
+        assert_eq!(
+            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None, false),
+            &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
+        );
+    }
+
+    #[test]
+    fn treats_virtual_and_2d_drm_drivers_as_software_rendering() {
+        assert!(linux_drm_driver_is_software_only(Some("virtio-pci")));
+        assert!(linux_drm_driver_is_software_only(Some("virtio_gpu")));
+        assert!(linux_drm_driver_is_software_only(Some("qxl")));
+        assert!(linux_drm_driver_is_software_only(Some("bochs")));
+        assert!(linux_drm_driver_is_software_only(None));
+        assert!(!linux_drm_driver_is_software_only(Some("amdgpu")));
+        assert!(!linux_drm_driver_is_software_only(Some("i915")));
+        assert!(!linux_drm_driver_is_software_only(Some("nouveau")));
     }
 
     #[test]
@@ -1195,7 +1305,16 @@ pub fn run() {
                 }
                 let _ = app.emit("dbx-open-db-files", db_paths);
             }
-            show_main_window(app);
+            // This runs inside the *existing* instance: a second launch has already
+            // handed over its arguments and exited. If we cannot reveal a window here
+            // the user is left with no feedback whatsoever - the app they clicked
+            // simply vanished - so make the reason recoverable from the logs.
+            if !show_main_window(app) {
+                eprintln!(
+                    "[WINDOW] single-instance handoff could not reveal the main window; {}",
+                    main_window_probe_state(app)
+                );
+            }
         }))
     } else {
         builder
@@ -1529,6 +1648,7 @@ pub fn run() {
             commands::schema::list_schema_infos,
             commands::schema::list_data_types,
             commands::schema::get_columns,
+            commands::schema::get_all_columns,
             commands::schema::get_sqlserver_column_metadata,
             commands::schema::list_indexes,
             commands::schema::list_foreign_keys,
@@ -1629,6 +1749,7 @@ pub fn run() {
             commands::sql_file::cancel_sql_file_execution,
             commands::external_sql::pending_open_sql_files,
             commands::external_sql::read_external_sql_file,
+            commands::external_sql::inspect_external_sql_file,
             commands::external_sql::write_external_sql_file,
             commands::external_sql::save_external_sql_file,
             commands::list_sql_files::list_sql_files_in_folder,
@@ -1653,6 +1774,8 @@ pub fn run() {
             commands::redis_cmd::redis_delete_key,
             commands::redis_cmd::redis_hash_set,
             commands::redis_cmd::redis_hash_del,
+            commands::redis_cmd::redis_hash_field_set_ttl,
+            commands::redis_cmd::redis_hash_field_set_expire_at,
             commands::redis_cmd::redis_list_push,
             commands::redis_cmd::redis_list_set,
             commands::redis_cmd::redis_list_remove,
@@ -1660,6 +1783,7 @@ pub fn run() {
             commands::redis_cmd::redis_set_remove,
             commands::redis_cmd::redis_zadd,
             commands::redis_cmd::redis_zrem,
+            commands::redis_cmd::redis_zset_update,
             commands::redis_cmd::redis_stream_add,
             commands::redis_cmd::redis_json_set,
             commands::redis_cmd::redis_check_json_module,
@@ -1708,8 +1832,14 @@ pub fn run() {
             commands::nacos_cmd::nacos_get_rnacos_console_captcha,
             commands::nacos_cmd::nacos_login_rnacos_console,
             commands::nacos_cmd::nacos_list_services,
+            commands::nacos_cmd::nacos_get_service,
+            commands::nacos_cmd::nacos_create_service,
+            commands::nacos_cmd::nacos_update_service,
+            commands::nacos_cmd::nacos_delete_service,
             commands::nacos_cmd::nacos_list_instances,
             commands::nacos_cmd::nacos_update_instance,
+            commands::nacos_cmd::nacos_register_instance,
+            commands::nacos_cmd::nacos_deregister_instance,
             commands::nacos_cmd::nacos_get_dashboard,
             commands::nacos_cmd::nacos_raw_request,
             commands::nacos_cmd::nacos_search_config_content,
@@ -1739,6 +1869,11 @@ pub fn run() {
             commands::mongo_cmd::mongo_drop_database,
             commands::mongo_cmd::mongo_drop_collection,
             commands::mongo_cmd::mongo_rename_collection,
+            commands::docs::docs_collect_snapshot,
+            commands::docs::docs_load_annotations,
+            commands::docs::docs_apply_annotations,
+            commands::docs::docs_save_annotations,
+            commands::docs::docs_export_html,
             commands::document_cmd::document_list_databases,
             commands::document_cmd::document_list_collections,
             commands::document_cmd::document_find_documents,
@@ -1825,6 +1960,8 @@ pub fn run() {
             commands::mq_cmd::mq_unbind,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_list_subscriptions,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_enrich_subscriptions,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_create_subscription,
             #[cfg(feature = "mq-admin")]
@@ -1921,6 +2058,22 @@ pub fn run() {
             commands::mq_cmd::mq_raw_request,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_send_message,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_get_broker_info,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_subscribe,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_unsubscribe,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_publish,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_list_topics,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_get_topic_tree,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_get_messages,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_clear_messages,
             commands::history::save_history,
             commands::history::load_history,
             commands::history::search_history,
@@ -2062,8 +2215,13 @@ pub fn run() {
 
             #[cfg(target_os = "macos")]
             if let RunEvent::Reopen { has_visible_windows, .. } = &event {
-                if !has_visible_windows {
-                    show_main_window(app_handle);
+                if !has_visible_windows && !show_main_window(app_handle) {
+                    // Dock / Finder reopen is the other way back into a hidden
+                    // instance, and it fails silently for the same reason.
+                    eprintln!(
+                        "[WINDOW] reopen could not reveal the main window; {}",
+                        main_window_probe_state(app_handle)
+                    );
                 }
                 let app_handle = app_handle.clone();
                 tauri::async_runtime::spawn(async move {

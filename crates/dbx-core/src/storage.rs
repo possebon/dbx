@@ -4094,6 +4094,7 @@ mod tests {
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
             auth_method: "password".to_string(),
+            allow_exec_channel_proxy: false,
             profile_id: String::new(),
         })
     }
@@ -4139,6 +4140,7 @@ mod tests {
 
     fn mq_connection(id: &str, token: &str) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: id.to_string(),
             name: "Pulsar".to_string(),
             note: String::new(),
@@ -4203,6 +4205,7 @@ mod tests {
 
     fn nacos_connection(id: &str, password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: id.to_string(),
             name: "Nacos".to_string(),
             note: String::new(),

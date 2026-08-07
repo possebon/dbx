@@ -111,13 +111,75 @@ pub fn is_vector_db(db_type: DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate | DatabaseType::ChromaDb)
 }
 
+/// `get_current_time` tool definition — DB-independent utility that returns
+/// the current UTC time plus a caller-provided local offset.
+fn get_current_time_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "get_current_time",
+        description: "Get the current date and time with timezone information. \
+                      Pass the client UTC offset from the system prompt; when \
+                      omitted, local time safely falls back to UTC. Use this to resolve \
+                      relative time expressions like \"last 7 days\", \
+                      \"yesterday\", \"this month\" into concrete dates \
+                      for constructing SQL queries.",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "utc_offset_minutes": {
+                    "type": "integer",
+                    "minimum": -1439,
+                    "maximum": 1439,
+                    "description": "Client UTC offset in minutes from the system prompt"
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "Client IANA timezone name from the system prompt"
+                }
+            },
+            "required": []
+        }),
+        read_only: true,
+        parallel_ok: true,
+    }
+}
+
+/// Execute `get_current_time` — returns a JSON payload with utc, local,
+/// utc_offset_minutes, timezone, and readable fields.
+fn execute_get_current_time(tool_call: &ToolCall) -> Result<String, String> {
+    let utc = chrono::Utc::now();
+    let offset_minutes = tool_call.arguments.get("utc_offset_minutes").and_then(serde_json::Value::as_i64).unwrap_or(0);
+    let offset_minutes = i32::try_from(offset_minutes).map_err(|_| "utc_offset_minutes is out of range".to_string())?;
+    let offset_seconds =
+        offset_minutes.checked_mul(60).ok_or_else(|| "utc_offset_minutes is out of range".to_string())?;
+    let offset = chrono::FixedOffset::east_opt(offset_seconds)
+        .ok_or_else(|| "utc_offset_minutes must be between -1439 and 1439".to_string())?;
+    let local = utc.with_timezone(&offset);
+    let timezone = tool_call
+        .arguments
+        .get("timezone")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| if offset_minutes == 0 { "UTC".to_string() } else { format!("UTC{}", local.format("%:z")) });
+    let readable = format!("{} ({timezone}, UTC{})", local.format("%Y-%m-%d %H:%M:%S"), local.format("%:z"));
+    Ok(serde_json::json!({
+        "utc": utc.to_rfc3339(),
+        "local": local.to_rfc3339(),
+        "utc_offset_minutes": offset_minutes,
+        "timezone": timezone,
+        "readable": readable,
+    })
+    .to_string())
+}
+
 /// Get read-only tool definitions for the given database type.
 /// Returns vector tools for vector DBs, SQL tools otherwise.
 pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
     if is_vector_db(db_type) {
-        vec![list_collections_tool()]
+        vec![list_collections_tool(), get_current_time_tool()]
     } else {
-        vec![list_tables_tool(), get_columns_tool()]
+        vec![list_tables_tool(), get_columns_tool(), get_current_time_tool()]
     }
 }
 
@@ -126,10 +188,12 @@ pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
 /// explain_query for database types that support them.
 pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) -> Vec<ToolDefinition> {
     if is_vector_db(db_type) {
-        return vec![list_collections_tool(), browse_collection_tool()];
+        return vec![list_collections_tool(), browse_collection_tool(), get_current_time_tool()];
     }
-    let mut tools = vec![list_tables_tool(), get_columns_tool()];
-    if supports_sql_query(db_type) {
+    let mut tools = vec![list_tables_tool(), get_columns_tool(), get_current_time_tool()];
+    if db_type == DatabaseType::MongoDb {
+        tools.push(mongo_execute_query_tool(sql_permissions));
+    } else if supports_sql_query(db_type) {
         tools.push(execute_query_tool(sql_permissions));
         tools.push(get_sample_data_tool());
     }
@@ -137,6 +201,29 @@ pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) ->
         tools.push(explain_query_tool());
     }
     tools
+}
+
+fn mongo_execute_query_tool(_sql_permissions: AgentSqlPermissions) -> ToolDefinition {
+    ToolDefinition {
+        name: "execute_query",
+        description: "Execute a read-only MongoDB shell command and return results (max 50 rows). Use commands such as db.collection.find({}), db.collection.findOne({}), db.collection.aggregate([]), or db.collection.countDocuments({}). Write commands are not available to the MongoDB Agent.",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": "The MongoDB shell-style command to execute"
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Max rows to return (default 50, max 100)"
+                }
+            },
+            "required": ["sql"]
+        }),
+        read_only: true,
+        parallel_ok: false,
+    }
 }
 
 /// list_tables tool definition.
@@ -358,6 +445,7 @@ pub async fn execute_tool(
                 }
             }
         }
+        "get_current_time" => execute_get_current_time(tool_call),
         _ => Err(format!("Unknown tool: {}", tool_call.name)),
     };
 
@@ -557,6 +645,10 @@ async fn execute_execute_query(
         .map(|l| (l as usize).min(MAX_ALLOWED_ROWS))
         .unwrap_or(EXECUTE_QUERY_LIMIT);
 
+    if *db_type == DatabaseType::MongoDb {
+        return execute_mongo_query(state, connection_id, database, sql, limit.max(1)).await;
+    }
+
     // Classify SQL risk using the concrete database dialect.
     let risk = crate::sql_risk::classify_sql_risk_for_database(sql, *db_type)?;
     let connection_config = state.configs.read().await.get(connection_id).cloned();
@@ -611,6 +703,29 @@ async fn execute_execute_query(
     )
     .await?;
 
+    format_query_result_as_text(&result, limit)
+}
+
+async fn execute_mongo_query(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    source: &str,
+    limit: usize,
+) -> Result<String, String> {
+    let command = crate::mongo_shell::parse(source).map_err(|error| {
+        format!(
+            "{error} Use MongoDB shell-style commands such as db.collection.find({{}}), db.collection.findOne({{}}), or db.collection.aggregate([])."
+        )
+    })?;
+    if command.is_mutating() {
+        return Err(
+            "Blocked: MongoDB Agent queries are read-only. Return the command for the user to review and execute manually in DBX."
+                .to_string(),
+        );
+    }
+
+    let result = crate::mongo_ops::execute_mongo_command_core(state, connection_id, database, &command, limit).await?;
     format_query_result_as_text(&result, limit)
 }
 
@@ -1034,12 +1149,13 @@ for line in sys.stdin:
     }
 
     #[cfg(unix)]
-    fn dameng_test_connection() -> ConnectionConfig {
+    fn agent_test_connection(id: &str, name: &str, db_type: DatabaseType, database: &str) -> ConnectionConfig {
         ConnectionConfig {
-            id: "dameng-1".to_string(),
-            name: "Dameng".to_string(),
+            docs_notes_path: None,
+            id: id.to_string(),
+            name: name.to_string(),
             note: String::new(),
-            db_type: DatabaseType::Dameng,
+            db_type,
             driver_profile: None,
             driver_label: None,
             url_params: None,
@@ -1048,7 +1164,7 @@ for line in sys.stdin:
             port: 5236,
             username: "APP_USER".to_string(),
             password: String::new(),
-            database: Some("APPDB".to_string()),
+            database: Some(database.to_string()),
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -1096,7 +1212,9 @@ for line in sys.stdin:
         let tools = read_only_tools(DatabaseType::Qdrant);
         let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
 
-        assert_eq!(names, vec!["list_collections"]);
+        assert!(names.contains(&"list_collections"));
+        assert!(!names.contains(&"browse_collection"));
+        assert!(names.contains(&"get_current_time"));
     }
 
     #[test]
@@ -1104,7 +1222,97 @@ for line in sys.stdin:
         let tools = all_tools(DatabaseType::Qdrant, AgentSqlPermissions::default());
         let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
 
-        assert_eq!(names, vec!["list_collections", "browse_collection"]);
+        assert!(names.contains(&"list_collections"));
+        assert!(names.contains(&"browse_collection"));
+        assert!(names.contains(&"get_current_time"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongodb_agent_registers_shell_query_tool_and_routes_find_one_as_read_only() {
+        let tools = all_tools(DatabaseType::MongoDb, AgentSqlPermissions::default());
+        let names = tools.iter().map(|tool| tool.name).collect::<Vec<_>>();
+        assert!(names.contains(&"execute_query"));
+        assert!(!names.contains(&"get_sample_data"));
+        assert!(!names.contains(&"explain_query"));
+        let execute_query = tools.iter().find(|tool| tool.name == "execute_query").unwrap();
+        assert!(execute_query.description.contains("MongoDB shell command"));
+        assert!(!execute_query.description.contains("SQL query"));
+        assert!(execute_query.description.contains("read-only"));
+
+        let confirmed_tools = all_tools(
+            DatabaseType::MongoDb,
+            AgentSqlPermissions {
+                allow_writes: true,
+                allow_dangerous: true,
+                confirmed_write_sql: Some("db.items.insertOne({name: 'test'})".to_string()),
+            },
+        );
+        let confirmed_execute_query = confirmed_tools.iter().find(|tool| tool.name == "execute_query").unwrap();
+        assert!(confirmed_execute_query.description.contains("read-only"));
+        assert!(!confirmed_execute_query.description.contains("confirmed write"));
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let call = ToolCall {
+            id: "mongo-find-one".to_string(),
+            name: "execute_query".to_string(),
+            arguments: json!({ "sql": "db.BenchmarkIndex_approved.findOne({})" }),
+            provider_payload: None,
+        };
+
+        let result = execute_tool(
+            &call,
+            &state,
+            "mongo-1",
+            "benchmark",
+            None,
+            &DatabaseType::MongoDb,
+            AgentSqlPermissions::default(),
+        )
+        .await;
+
+        assert!(result.is_error);
+        assert!(!result.content.contains("Blocked:"), "{}", result.content);
+        assert!(result.content.contains("Connection") || result.content.contains("connection"), "{}", result.content);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongodb_agent_keeps_all_writes_blocked_after_sql_confirmation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let permissions = AgentSqlPermissions {
+            allow_writes: true,
+            allow_dangerous: true,
+            confirmed_write_sql: Some("SQL confirmation does not grant MongoDB writes".to_string()),
+        };
+
+        for (index, source) in [
+            "db.items.insertOne({name: 'test'})",
+            "db.items.updateMany({tenant: 7}, {$set: {active: false}})",
+            "db.items.deleteMany({tenant: 7})",
+            "db.items.createIndex({tenant: 1})",
+            r#"db.items.aggregate([{"$out":"items_backup"}])"#,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let call = ToolCall {
+                id: format!("mongo-write-{index}"),
+                name: "execute_query".to_string(),
+                arguments: json!({ "sql": source }),
+                provider_payload: None,
+            };
+            let result =
+                execute_tool(&call, &state, "mongo-1", "benchmark", None, &DatabaseType::MongoDb, permissions.clone())
+                    .await;
+
+            assert!(result.is_error, "{source}: {}", result.content);
+            assert!(result.content.contains("read-only"), "{source}: {}", result.content);
+        }
     }
 
     #[test]
@@ -1226,7 +1434,7 @@ for line in sys.stdin:
         let (client, _script) = spawn_recording_agent(&record_path).await;
         let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
         let state = Arc::new(AppState::new(storage));
-        let connection = dameng_test_connection();
+        let connection = agent_test_connection("dameng-1", "Dameng", DatabaseType::Dameng, "APPDB");
         state.configs.write().await.insert(connection.id.clone(), connection);
         state.connections.write().await.insert("dameng-1:APPDB".to_string(), PoolKind::agent(client));
 
@@ -1280,6 +1488,46 @@ for line in sys.stdin:
             assert_eq!(request["params"]["database"], "APPDB");
             assert_eq!(request["params"]["schema"], "REPORTING");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mysql_agent_allows_show_triggers_without_write_confirmation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let record_path = temp_dir.path().join("agent-requests.jsonl");
+        let (client, _script) = spawn_recording_agent(&record_path).await;
+        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let connection = agent_test_connection("mysql-1", "MySQL", DatabaseType::Mysql, "rs_main");
+        state.configs.write().await.insert(connection.id.clone(), connection);
+        state.connections.write().await.insert("mysql-1:rs_main".to_string(), PoolKind::agent(client));
+
+        let sql = "SHOW TRIGGERS FROM `rs_main` LIKE 'trg_order_items_after_%';";
+        let call = ToolCall {
+            id: "show-triggers".to_string(),
+            name: "execute_query".to_string(),
+            arguments: json!({ "sql": sql }),
+            provider_payload: None,
+        };
+        let result = execute_tool(
+            &call,
+            &state,
+            "mysql-1",
+            "rs_main",
+            None,
+            &DatabaseType::Mysql,
+            AgentSqlPermissions::default(),
+        )
+        .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        let request = std::fs::read_to_string(&record_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|request| request["method"] == "execute_query")
+            .unwrap();
+        assert_eq!(request["params"]["sql"], sql);
     }
 
     #[test]
@@ -1467,5 +1715,164 @@ for line in sys.stdin:
         // contract — the frontend is responsible for only sending
         // allow_write_sql=true when a specific SQL was confirmed.
         assert!(sql_matches_confirmed_write("INSERT INTO t VALUES (1)", &None));
+    }
+
+    // ── get_current_time tests ────────────────────────────────────────────
+
+    #[test]
+    fn get_current_time_is_in_all_tools_postgres() {
+        let tools = all_tools(DatabaseType::Postgres, AgentSqlPermissions::default());
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        assert!(names.contains(&"get_current_time"), "get_current_time missing from all_tools(Postgres)");
+    }
+
+    #[test]
+    fn get_current_time_is_in_read_only_tools_postgres() {
+        let tools = read_only_tools(DatabaseType::Postgres);
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        assert!(names.contains(&"get_current_time"), "get_current_time missing from read_only_tools(Postgres)");
+    }
+
+    #[test]
+    fn get_current_time_is_in_all_tools_qdrant() {
+        let tools = all_tools(DatabaseType::Qdrant, AgentSqlPermissions::default());
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        assert!(names.contains(&"get_current_time"), "get_current_time missing from all_tools(Qdrant)");
+    }
+
+    #[test]
+    fn get_current_time_is_in_read_only_tools_qdrant() {
+        let tools = read_only_tools(DatabaseType::Qdrant);
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        assert!(names.contains(&"get_current_time"), "get_current_time missing from read_only_tools(Qdrant)");
+    }
+
+    #[test]
+    fn get_current_time_tool_is_read_only_and_parallel_ok() {
+        let tool = get_current_time_tool();
+        assert!(tool.read_only, "get_current_time must be read_only");
+        assert!(tool.parallel_ok, "get_current_time must be parallel_ok");
+    }
+
+    #[test]
+    fn execute_get_current_time_returns_valid_timestamps() {
+        let before_secs = chrono::Utc::now().timestamp();
+        let tool_call = ToolCall {
+            id: "call-gct".to_string(),
+            name: "get_current_time".to_string(),
+            arguments: serde_json::json!({ "utc_offset_minutes": 480, "timezone": "Asia/Shanghai" }),
+            provider_payload: None,
+        };
+        let result = execute_get_current_time(&tool_call).expect("get_current_time should succeed");
+        let after_secs = chrono::Utc::now().timestamp();
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("get_current_time result should be valid JSON");
+
+        let utc_str = parsed["utc"].as_str().expect("utc field should be a string");
+        let local_str = parsed["local"].as_str().expect("local field should be a string");
+
+        // Parse as RFC3339 timestamps.
+        let _utc_dt = chrono::DateTime::parse_from_rfc3339(utc_str).expect("utc should be valid RFC3339");
+        let local_dt = chrono::DateTime::parse_from_rfc3339(local_str).expect("local should be valid RFC3339");
+
+        // Verify UTC is within tolerance.
+        let utc_dt_utc = chrono::DateTime::parse_from_rfc3339(utc_str)
+            .expect("utc should parse as rfc3339")
+            .with_timezone(&chrono::Utc);
+        let utc_ts = utc_dt_utc.timestamp();
+        assert!(
+            utc_ts >= before_secs && utc_ts <= after_secs + 1,
+            "UTC timestamp {utc_ts} should be within [{before_secs}, {after_secs}+1]"
+        );
+
+        // Verify local is within tolerance (converted to UTC).
+        let local_ts = local_dt.with_timezone(&chrono::Utc).timestamp();
+        assert!(
+            local_ts >= before_secs && local_ts <= after_secs + 1,
+            "Local timestamp {local_ts} (UTC) should be within [{before_secs}, {after_secs}+1]"
+        );
+
+        // utc_offset_minutes should match the offset in local.
+        let offset_minutes =
+            parsed["utc_offset_minutes"].as_i64().expect("utc_offset_minutes should be an integer") as i32;
+        let local_offset_secs = local_dt.offset().local_minus_utc();
+        // The offset from the RFC3339 timestamp should match utc_offset_minutes * 60.
+        assert_eq!(
+            local_offset_secs / 60,
+            offset_minutes,
+            "utc_offset_minutes {offset_minutes} does not match local offset {}",
+            local_offset_secs / 60
+        );
+        assert_eq!(offset_minutes, 480);
+        assert_eq!(parsed["timezone"], "Asia/Shanghai");
+
+        // readable should be a non-empty string.
+        let readable = parsed["readable"].as_str().expect("readable field should be a string");
+        assert!(!readable.is_empty(), "readable should not be empty");
+    }
+
+    #[test]
+    fn execute_get_current_time_defaults_to_utc_without_client_context() {
+        let tool_call = ToolCall {
+            id: "call-gct".to_string(),
+            name: "get_current_time".to_string(),
+            arguments: serde_json::json!({}),
+            provider_payload: None,
+        };
+        let result = execute_get_current_time(&tool_call).expect("get_current_time should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["utc_offset_minutes"], 0);
+        assert_eq!(parsed["timezone"], "UTC");
+        assert!(parsed["local"].as_str().unwrap().ends_with("+00:00"));
+    }
+
+    #[test]
+    fn execute_get_current_time_labels_offset_when_timezone_name_is_missing() {
+        let tool_call = ToolCall {
+            id: "call-gct".to_string(),
+            name: "get_current_time".to_string(),
+            arguments: serde_json::json!({ "utc_offset_minutes": -300 }),
+            provider_payload: None,
+        };
+        let result = execute_get_current_time(&tool_call).expect("get_current_time should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["timezone"], "UTC-05:00");
+        assert!(parsed["local"].as_str().unwrap().ends_with("-05:00"));
+    }
+
+    #[test]
+    fn execute_tool_get_current_time_is_not_error() {
+        // Test via execute_tool dispatch. All args can be dummy since the tool
+        // does not use any of them.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let storage = crate::storage::Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+            let state = std::sync::Arc::new(crate::connection::AppState::new(storage));
+            let tool_call = ToolCall {
+                id: "call-gct".to_string(),
+                name: "get_current_time".to_string(),
+                arguments: serde_json::json!({}),
+                provider_payload: None,
+            };
+            let result = execute_tool(
+                &tool_call,
+                &state,
+                "dummy",
+                "dummy",
+                None,
+                &DatabaseType::Postgres,
+                AgentSqlPermissions::default(),
+            )
+            .await;
+            assert!(!result.is_error, "execute_tool get_current_time should not error: {}", result.content);
+            let parsed: serde_json::Value = serde_json::from_str(&result.content).expect("result should be valid JSON");
+            assert!(parsed["utc"].is_string());
+            assert!(parsed["local"].is_string());
+            assert!(parsed["readable"].is_string());
+        });
     }
 }

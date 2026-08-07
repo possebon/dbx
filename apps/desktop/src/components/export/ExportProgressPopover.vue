@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
@@ -12,7 +12,18 @@ const { tasks, activeCount, hasActive, clearFinished, cancelTask, removeTask } =
 const open = ref(false);
 const showAll = ref(false);
 const expandedFailureTaskIds = ref<string[]>([]);
+const currentTime = ref(Date.now());
 const MAX_VISIBLE = 5;
+
+let elapsedTimer: ReturnType<typeof setInterval> | undefined;
+onMounted(() => {
+  elapsedTimer = setInterval(() => {
+    currentTime.value = Date.now();
+  }, 1000);
+});
+onBeforeUnmount(() => {
+  if (elapsedTimer) clearInterval(elapsedTimer);
+});
 
 const reversedTasks = computed(() => {
   return [...tasks.value].reverse();
@@ -57,7 +68,10 @@ const progressValue = (task: ExportTask) => {
 };
 
 const taskTitle = (task: ExportTask) => {
-  if (task.kind === "database-export") return t("exportProgress.databaseExportTitle", { name: task.tableName });
+  if (task.kind === "database-export") {
+    const key = task.databaseExportSource === "scheduled" ? "exportProgress.databaseBackupTitle" : "exportProgress.databaseExportTitle";
+    return t(key, { name: task.tableName });
+  }
   if (task.kind === "sql-file") return t("exportProgress.sqlFileTitle", { name: task.tableName });
   if (task.kind === "data-transfer") return t("exportProgress.dataTransferTitle", { name: task.tableName });
   return `${task.tableName}.${task.format}`;
@@ -94,6 +108,24 @@ const rowsText = (task: ExportTask) => {
   }
   if (task.totalRows) return `${task.rowsExported.toLocaleString()} / ${task.totalRows.toLocaleString()}`;
   return `${task.rowsExported.toLocaleString()} ${t("exportProgress.rowsShort")}`;
+};
+
+const elapsedText = (task: ExportTask) => {
+  if (task.startedAt === undefined) return "";
+  const finishedAt = task.finishedAt ?? currentTime.value;
+  return t("exportProgress.elapsed", { duration: formatDataTransferDuration(finishedAt - task.startedAt) });
+};
+
+const databaseObjectText = (task: ExportTask) => {
+  if (task.kind !== "database-export" || !isActive(task.status) || !task.currentObject) return "";
+  if (task.preparing || !task.totalObjects) {
+    return t("databaseExport.preparingObject", { object: task.currentObject });
+  }
+  return t("databaseExport.currentTable", {
+    table: task.currentObject,
+    current: (task.objectIndex ?? 0).toLocaleString(),
+    total: task.totalObjects.toLocaleString(),
+  });
 };
 
 const statusIcon = (task: ExportTask) => {
@@ -155,7 +187,7 @@ function failureDetailCount(task: ExportTask) {
     <PopoverTrigger as-child>
       <Button variant="ghost" size="icon" class="relative h-8 w-8" :title="triggerTitle" :class="{ 'bg-destructive/10 text-destructive hover:bg-destructive/15': failedCount > 0, 'bg-accent text-primary': failedCount === 0 && hasActive }">
         <FileDown class="h-4 w-4" />
-        <span v-if="failedCount > 0" class="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold leading-none text-destructive-foreground"> ! </span>
+        <span v-if="failedCount > 0" class="absolute right-0.5 top-0.5 h-2.5 w-2.5 rounded-full bg-destructive ring-2 ring-background" />
         <span v-else-if="hasActive" class="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-medium leading-none text-primary-foreground">
           {{ activeCount > 9 ? "9+" : activeCount }}
         </span>
@@ -190,8 +222,13 @@ function failureDetailCount(task: ExportTask) {
               <div class="h-full bg-green-500 rounded-full" style="width: 100%" />
             </div>
 
+            <div v-if="databaseObjectText(task)" class="min-w-0 truncate text-muted-foreground" :title="task.currentObject">
+              {{ databaseObjectText(task) }}
+            </div>
+
             <div class="min-w-0 text-muted-foreground">
               <span class="break-words tabular-nums">{{ rowsText(task) }}</span>
+              <span v-if="task.kind !== 'data-transfer' && task.startedAt !== undefined" class="ml-1 tabular-nums">{{ elapsedText(task) }}</span>
               <span v-if="task.status === 'Error' && task.errorMessage" class="mt-1 block whitespace-normal break-words text-destructive" :title="translateBackendError(t, task.errorMessage)">
                 {{ translateBackendError(t, task.errorMessage) }}
               </span>

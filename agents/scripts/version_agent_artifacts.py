@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 
-NATIVE_DRIVERS = ("oracle", "xugu", "kingbase", "duckdb", "rabbitmq")
+NATIVE_DRIVERS = ("cassandra", "oracle", "xugu", "kingbase", "neo4j", "vastbase", "duckdb", "rabbitmq", "tdengine")
 PLATFORMS = (
     "macos-aarch64",
     "macos-x64",

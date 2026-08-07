@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { executionCandidateForMode } from "@/lib/sql/sqlExecutionTarget";
 import { buildExecutionCandidates, currentExecutableStatementRange, executableStatementRanges, fullSqlRange, hasMultipleExecutionTargets, splitSqlStatementRanges, statementRangeAtCursor, supportsExecutionTargetPicker } from "@/lib/sql/sqlStatementRanges";
 
 function indexOf(sql: string, needle: string, occurrence = 1): number {
@@ -27,6 +28,23 @@ function candidateLabels(candidates: Array<{ label: string }>): string[] {
 function candidateSummaries(candidates: Array<{ kind: string; sql: string }>): string[] {
   return candidates.map((candidate) => `${candidate.kind}:${candidate.sql.trim()}`);
 }
+
+function trailingSpacePositionsAfter(sql: string, marker: string): number[] {
+  const markerEnd = sql.indexOf(marker) + marker.length;
+  const lineEnd = sql.indexOf("\n", markerEnd);
+  const end = lineEnd === -1 ? sql.length : lineEnd;
+  const positions: number[] = [];
+  for (let p = markerEnd; p < end; p += 1) {
+    if (sql[p] === " " || sql[p] === "\t") positions.push(p);
+  }
+  return positions;
+}
+
+// Reported repro: trailing spaces sit after `AS uu` (a NON-final line of the
+// middle statement) with `WHERE id = 2` continuing on the next line. The cursor
+// is inside the statement body, so the middle statement must be kept.
+const screenshotSqlNoSemi = "SELECT * FROM `profiles`\nWHERE active = 1\nSELECT * FROM `users` AS uu   \nWHERE id = 2\nSELECT * FROM `orders`\nWHERE status = 'paid'";
+const screenshotSqlWithSemi = "SELECT * FROM `profiles`;\nSELECT * FROM `users` AS uu   \nWHERE id = 2\nSELECT * FROM `orders`;";
 
 const oraclePlSqlFixture = `DECLARE
   v_order_count NUMBER;
@@ -346,6 +364,24 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(oracleIssue2405PlSql, "oracle"))).toEqual([oracleIssue2405PlSql]);
   });
 
+  it("splits large Dameng package bodies without repeated prefix parsing", () => {
+    const body = Array.from({ length: 3000 }, (_, index) => `    v_value := v_value + ${index % 10};`).join("\n");
+    const packageBody = `CREATE OR REPLACE PACKAGE BODY app.big_pkg AS
+  PROCEDURE run IS
+    v_value NUMBER := 0;
+  BEGIN
+${body}
+  END run;
+END big_pkg;`;
+    const sql = `${packageBody}\n/\nSELECT 1;`;
+    const startedAt = performance.now();
+    const ranges = splitSqlStatementRanges(sql, "dameng");
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(rangeSqlTexts(ranges)).toEqual([packageBody, "SELECT 1"]);
+    expect(elapsedMs).toBeLessThan(1000);
+  });
+
   it("keeps nested GaussDB procedure blocks together", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(gaussDbNestedProcedure, "gaussdb"))).toEqual([gaussDbNestedProcedure]);
   });
@@ -513,6 +549,22 @@ GET /_cat/indices`;
     expect(range?.sql.trim()).toBe("SELECT *\nFROM system_dept");
   });
 
+  it("keeps a standalone next-line semicolon cursor on the current multi-line statement", () => {
+    const sql = "SELECT *\nFROM system_dept\n;\n\nSELECT * FROM sys;";
+    const delimiterPos = sql.indexOf(";");
+
+    expect(statementRangeAtCursor(sql, delimiterPos)?.sql.trim()).toBe("SELECT *\nFROM system_dept");
+    expect(statementRangeAtCursor(sql, delimiterPos + 1)?.sql.trim()).toBe("SELECT *\nFROM system_dept");
+  });
+
+  it("assigns a standalone trailing semicolon to the final soft statement", () => {
+    const sql = "SELECT * FROM `t_0001`\nSELECT * FROM `t_0001` LIMIT 1\n;";
+    const delimiterPos = sql.lastIndexOf(";");
+
+    expect(statementRangeAtCursor(sql, delimiterPos, "mysql")?.sql).toBe("SELECT * FROM `t_0001` LIMIT 1");
+    expect(statementRangeAtCursor(sql, delimiterPos + 1, "mysql")?.sql).toBe("SELECT * FROM `t_0001` LIMIT 1");
+  });
+
   it("returns the next same-line statement when the cursor is inside it", () => {
     const sql = "SELECT 1;   SELECT 2;";
     const pos = indexOf(sql, "SELECT 2") + 1;
@@ -545,6 +597,70 @@ GET /_cat/indices`;
 
     expect(statementRangeAtCursor(sql, indexOf(sql, "tbA"))?.sql.trim()).toBe(expected);
     expect(statementRangeAtCursor(sql, indexOf(sql, "tbB"))?.sql.trim()).toBe(expected);
+  });
+
+  it("keeps a trailing-whitespace cursor on a multi-line WITH statement tail", () => {
+    const sql = "WITH x AS (SELECT 1)\nSELECT 2   \nSELECT 3;";
+    const contentEnd = sql.indexOf("SELECT 2") + "SELECT 2".length;
+
+    for (const pos of [contentEnd, contentEnd + 1, contentEnd + 2]) {
+      expect(statementRangeAtCursor(sql, pos)?.sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+    }
+  });
+
+  it("keeps a trailing-whitespace cursor on a UNION operand tail", () => {
+    const sql = "SELECT 1\nUNION\nSELECT 2   \nSELECT 3;";
+    const contentEnd = sql.indexOf("SELECT 2") + "SELECT 2".length;
+
+    expect(statementRangeAtCursor(sql, contentEnd + 1)?.sql).toBe("SELECT 1\nUNION\nSELECT 2");
+    expect(statementRangeAtCursor(sql, contentEnd + 2)?.sql).toBe("SELECT 1\nUNION\nSELECT 2");
+  });
+
+  it("keeps a trailing-whitespace cursor on an EXPLAIN target tail", () => {
+    const sql = "EXPLAIN\nSELECT 2   \nSELECT 3;";
+    const contentEnd = sql.indexOf("SELECT 2") + "SELECT 2".length;
+
+    expect(statementRangeAtCursor(sql, contentEnd + 1)?.sql).toBe("EXPLAIN\nSELECT 2");
+  });
+
+  it("does not swallow the following statement when a trailing-whitespace cursor sits on a semicolon-terminated multi-line statement tail", () => {
+    const sql = "SELECT 0;\nWITH x AS (SELECT 1)\nSELECT 2   \nSELECT 3;";
+    const contentEnd = sql.indexOf("SELECT 2") + "SELECT 2".length;
+
+    expect(statementRangeAtCursor(sql, contentEnd + 1)?.sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+    expect(statementRangeAtCursor(sql, contentEnd + 2)?.sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+  });
+
+  it("keeps a trailing-whitespace cursor on a non-final line of a multi-line middle statement (no semicolons before)", () => {
+    // Reported repro: spaces after `AS uu`, `WHERE id = 2` follows on the next line.
+    const expected = "SELECT * FROM `users` AS uu   \nWHERE id = 2";
+    const positions = trailingSpacePositionsAfter(screenshotSqlNoSemi, "uu");
+
+    expect(positions.length).toBeGreaterThan(0);
+    for (const pos of positions) {
+      expect(statementRangeAtCursor(screenshotSqlNoSemi, pos, "mysql")?.sql).toBe(expected);
+    }
+  });
+
+  it("keeps a trailing-whitespace cursor on a non-final line of a multi-line middle statement (semicolons before)", () => {
+    const expected = "SELECT * FROM `users` AS uu   \nWHERE id = 2";
+    const positions = trailingSpacePositionsAfter(screenshotSqlWithSemi, "uu");
+
+    expect(positions.length).toBeGreaterThan(0);
+    for (const pos of positions) {
+      expect(statementRangeAtCursor(screenshotSqlWithSemi, pos, "mysql")?.sql).toBe(expected);
+    }
+  });
+
+  it("keeps a trailing-whitespace cursor on the last line of a multi-line middle statement", () => {
+    const sql = "SELECT 1;\nSELECT * FROM `users` AS uu\nWHERE id = 2   \nSELECT * FROM `orders`;";
+    const expected = "SELECT * FROM `users` AS uu\nWHERE id = 2";
+    const positions = trailingSpacePositionsAfter(sql, "= 2");
+
+    expect(positions.length).toBeGreaterThan(0);
+    for (const pos of positions) {
+      expect(statementRangeAtCursor(sql, pos, "mysql")?.sql).toBe(expected);
+    }
   });
 
   it("keeps newline set-operation operands with ALL modifiers together", () => {
@@ -1060,6 +1176,24 @@ describe("buildExecutionCandidates", () => {
     expect(candidates[0].sql).toBe(hintedSql);
   });
 
+  it("preserves leading tenant routing hints in current statement candidates", () => {
+    const hintedSql = "/*@global:true*/\nSELECT * FROM tenant_table";
+    const sql = `SELECT 1;\n${hintedSql};`;
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "tenant_table"), "mysql");
+
+    expect(candidates[0].sql).toBe(hintedSql);
+    expect(splitSqlStatementRanges("/*@global:true*/", "mysql")).toEqual([]);
+  });
+
+  it("preserves leading ampersand tenant routing hints in current statement candidates", () => {
+    const hintedSql = "/*&tenant:mctest*/\nSELECT count(*) FROM tenant_table";
+    const sql = `SELECT 1;\n${hintedSql};`;
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "tenant_table"), "mysql");
+
+    expect(candidates[0].sql).toBe(hintedSql);
+    expect(splitSqlStatementRanges("/*&tenant:mctest*/", "mysql")).toEqual([]);
+  });
+
   it("uses the cursor statement for the first candidate when there is no selection", () => {
     const sql = "SELECT *\nFROM users\nWHERE active = 1";
     const candidates = buildExecutionCandidates(sql, indexOf(sql, "users"));
@@ -1095,6 +1229,20 @@ describe("buildExecutionCandidates", () => {
     expect(candidateLabels(candidates)).toEqual(["currentStatement", "allStatements"]);
   });
 
+  it("keeps a MySQL FORCE INDEX query current when its semicolon is on the next line", () => {
+    const firstStatement = `SELECT count(*)
+FROM cus_loan_status_copy1 t2
+LEFT JOIN case_allocation_details_copy1 t4 FORCE INDEX(idx_debt_case_number)
+  ON t2.caseno = t4.debt_case_number
+WHERE t2.product_name = '12345'
+;`;
+    const sql = `${firstStatement}\n\nSELECT count(*) FROM cus_loan_status_copy1;`;
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "12345"), "mysql");
+
+    expect(candidateKinds(candidates)).toEqual(["cursor", "all"]);
+    expect(executionCandidateForMode(candidates, "current")?.sql.trim()).toBe(firstStatement.replace(/\n;$/, ""));
+  });
+
   it("uses the current statement when the cursor is immediately after its semicolon before a blank line", () => {
     const sql = "select 1;\n\nselect 2;";
     const cursorAfterFirstSemicolon = sql.indexOf(";") + 1;
@@ -1108,6 +1256,58 @@ describe("buildExecutionCandidates", () => {
     expect(candidateSummaries(candidates)).toEqual(["cursor:SELECT 2", "all:SELECT 1\nSELECT 2"]);
   });
 
+  it("uses the multi-line cursor statement at a trailing-whitespace tail instead of falling back to the whole script", () => {
+    const sql = "WITH x AS (SELECT 1)\nSELECT 2   \nSELECT 3;";
+    const contentEnd = sql.indexOf("SELECT 2") + "SELECT 2".length;
+    const candidates = buildExecutionCandidates(sql, contentEnd + 1, "mysql");
+
+    expect(candidateKinds(candidates)).toEqual(["cursor", "all"]);
+    expect(candidates[0].sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+  });
+
+  it("uses the cursor statement at a semicolon-terminated multi-line tail instead of swallowing the following statement", () => {
+    const sql = "SELECT 0;\nWITH x AS (SELECT 1)\nSELECT 2   \nSELECT 3;";
+    const contentEnd = sql.indexOf("SELECT 2") + "SELECT 2".length;
+    const candidates = buildExecutionCandidates(sql, contentEnd + 2, "mysql");
+
+    expect(candidates[0].kind).toBe("cursor");
+    expect(candidates[0].sql).toBe("WITH x AS (SELECT 1)\nSELECT 2");
+  });
+
+  it("submits only the middle statement for a trailing-whitespace cursor on its non-final line (no semicolons before)", () => {
+    const expected = "SELECT * FROM `users` AS uu   \nWHERE id = 2";
+    const pos = trailingSpacePositionsAfter(screenshotSqlNoSemi, "uu")[0];
+    const candidates = buildExecutionCandidates(screenshotSqlNoSemi, pos, "mysql");
+
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe(expected);
+    expect(executionCandidateForMode(candidates, "all")?.sql).toBe(screenshotSqlNoSemi);
+  });
+
+  it("submits only the middle statement for a trailing-whitespace cursor on its non-final line (semicolons before)", () => {
+    const expected = "SELECT * FROM `users` AS uu   \nWHERE id = 2";
+    const pos = trailingSpacePositionsAfter(screenshotSqlWithSemi, "uu")[0];
+    const candidates = buildExecutionCandidates(screenshotSqlWithSemi, pos, "mysql");
+
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe(expected);
+  });
+
+  it("submits only the middle statement, not the merged script, for a trailing-whitespace cursor on its last line", () => {
+    const sql = "SELECT 1;\nSELECT * FROM `users` AS uu\nWHERE id = 2   \nSELECT * FROM `orders`;";
+    const expected = "SELECT * FROM `users` AS uu\nWHERE id = 2";
+    const pos = trailingSpacePositionsAfter(sql, "= 2")[0];
+    const candidates = buildExecutionCandidates(sql, pos, "mysql");
+
+    expect(executionCandidateForMode(candidates, "current")?.sql).toBe(expected);
+  });
+
+  it("uses the final soft statement when the cursor is on a standalone trailing semicolon", () => {
+    const sql = "SELECT * FROM `t_0001`\nSELECT * FROM `t_0001` LIMIT 1\n;";
+    const candidates = buildExecutionCandidates(sql, sql.lastIndexOf(";"), "mysql");
+
+    expect(candidateSummaries(candidates)).toEqual(["cursor:SELECT * FROM `t_0001` LIMIT 1", "all:SELECT * FROM `t_0001`\nSELECT * FROM `t_0001` LIMIT 1\n;"]);
+  });
+
   it("dedupes when the cursor statement equals the full document", () => {
     const sql = "SELECT 1;";
     const candidates = buildExecutionCandidates(sql, indexOf(sql, "1"));
@@ -1119,6 +1319,16 @@ describe("buildExecutionCandidates", () => {
     const sql = "SELECT 1;\n\nSELECT 2;";
     const candidates = buildExecutionCandidates(sql, sql.indexOf("\n") + 1);
     expect(candidateKinds(candidates)).toEqual(["all"]);
+    expect(candidates[0].supportedKinds).toEqual(["all"]);
+    expect(executionCandidateForMode(candidates, "current")).toBeNull();
+    expect(executionCandidateForMode(candidates, "all")).toBe(candidates[0]);
+  });
+
+  it("marks a deduplicated single-statement candidate as both current and all", () => {
+    const sql = "SELECT 1;";
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "1"));
+
+    expect(candidates[0].supportedKinds).toEqual(["cursor", "all"]);
   });
 
   it("returns no candidates for an empty document", () => {
@@ -1201,6 +1411,7 @@ describe("supportsExecutionTargetPicker", () => {
     expect(supportsExecutionTargetPicker("zookeeper")).toBe(false);
     expect(supportsExecutionTargetPicker("mq")).toBe(false);
     expect(supportsExecutionTargetPicker("neo4j")).toBe(false);
+    expect(supportsExecutionTargetPicker("victoriametrics")).toBe(false);
     expect(supportsExecutionTargetPicker(undefined)).toBe(false);
   });
 });

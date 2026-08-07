@@ -134,6 +134,7 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
         .route("/mq/messages/query-by-topic", post(routes::mq::query_messages_by_topic))
         .route("/mq/messages/trace", post(routes::mq::query_message_trace))
         .route("/mq/subscriptions/list", post(routes::mq::list_subscriptions))
+        .route("/mq/subscriptions/enrich", post(routes::mq::enrich_subscriptions))
         .route("/mq/subscriptions/create", post(routes::mq::create_subscription))
         .route("/mq/subscriptions/delete", post(routes::mq::delete_subscription))
         .route("/mq/subscriptions/skip-messages", post(routes::mq::skip_messages))
@@ -312,6 +313,7 @@ async fn main() {
         .route("/system/fonts", get(routes::jdbc::list_system_fonts))
         .route("/ssh/config-hosts", get(routes::ssh_config::list_ssh_config_hosts))
         .route("/ssh/prompts", get(routes::ssh_prompt::stream_ssh_prompts))
+        .route("/ssh/prompts/pending", get(routes::ssh_prompt::list_pending_ssh_prompts))
         .route("/ssh/prompts/resolve", post(routes::ssh_prompt::resolve_ssh_prompt))
         // Tunnel profiles
         .route("/tunnel-profiles/list", get(routes::tunnel_profiles::load_tunnel_profiles))
@@ -360,6 +362,7 @@ async fn main() {
         .route("/schema/completion-assistant", post(routes::schema::completion_assistant_search))
         .route("/schema/object-source", get(routes::schema::get_object_source))
         .route("/schema/columns", get(routes::schema::list_columns))
+        .route("/schema/all-columns", get(routes::schema::get_all_columns))
         .route("/schema/data-types", get(routes::schema::list_data_types))
         .route("/schema/indexes", get(routes::schema::list_indexes))
         .route("/schema/foreign-keys", get(routes::schema::list_foreign_keys))
@@ -374,6 +377,11 @@ async fn main() {
         .route("/schema/extensions", get(routes::schema::list_extensions))
         .route("/schema/available-extensions", get(routes::schema::list_available_extensions))
         .route("/schema/ddl", get(routes::schema::get_ddl))
+        .route("/docs/snapshot", post(routes::docs::collect_snapshot))
+        .route("/docs/annotations/load", post(routes::docs::load_annotations))
+        .route("/docs/annotations/apply", post(routes::docs::apply_annotations))
+        .route("/docs/annotations/save", post(routes::docs::save_annotations))
+        .route("/docs/export", post(routes::docs::export_html))
         .route("/dialect/data-types", get(routes::dialect::list_data_types))
         .route("/schema-diff/prepare", post(routes::schema_diff::prepare_schema_diff))
         .route("/schema-diff/generate-sync-sql", post(routes::schema_diff::generate_schema_sync_sql))
@@ -504,12 +512,15 @@ async fn main() {
         .route("/redis/delete-key", post(routes::redis::delete_key))
         .route("/redis/hash-set", post(routes::redis::hash_set))
         .route("/redis/hash-del", post(routes::redis::hash_del))
+        .route("/redis/hash-field-set-ttl", post(routes::redis::hash_field_set_ttl))
+        .route("/redis/hash-field-set-expire-at", post(routes::redis::hash_field_set_expire_at))
         .route("/redis/list-push", post(routes::redis::list_push))
         .route("/redis/list-set", post(routes::redis::list_set))
         .route("/redis/list-remove", post(routes::redis::list_remove))
         .route("/redis/set-add", post(routes::redis::set_add))
         .route("/redis/set-remove", post(routes::redis::set_remove))
         .route("/redis/zadd", post(routes::redis::zadd))
+        .route("/redis/zset-update", post(routes::redis::zset_update))
         .route("/redis/stream-add", post(routes::redis::stream_add))
         .route("/redis/json-set", post(routes::redis::json_set))
         .route("/redis/check-json-module", post(routes::redis::check_json_module))
@@ -569,8 +580,14 @@ async fn main() {
         .route("/nacos/rnacos-console/captcha", post(routes::nacos::get_rnacos_console_captcha))
         .route("/nacos/rnacos-console/login", post(routes::nacos::login_rnacos_console))
         .route("/nacos/services/list", post(routes::nacos::list_services))
+        .route("/nacos/services/get", post(routes::nacos::get_service))
+        .route("/nacos/services/create", post(routes::nacos::create_service))
+        .route("/nacos/services/update", post(routes::nacos::update_service))
+        .route("/nacos/services/delete", post(routes::nacos::delete_service))
         .route("/nacos/instances/list", post(routes::nacos::list_instances))
         .route("/nacos/instances/update", post(routes::nacos::update_instance))
+        .route("/nacos/instances/register", post(routes::nacos::register_instance))
+        .route("/nacos/instances/deregister", post(routes::nacos::deregister_instance))
         .route("/nacos/dashboard", post(routes::nacos::get_dashboard))
         .route("/nacos/raw", post(routes::nacos::raw_request))
         .route("/nacos/configs/search", post(routes::nacos::search_config_content))
@@ -789,6 +806,14 @@ async fn main() {
 
     if public_base_path != "/" {
         app = Router::new().nest(&public_base_path, app);
+        // axum 的 nest 不匹配“子路径根目录”(带尾斜杠,如 /dbx/),导致子路径部署时首页 404。
+        // 在 nest 外层显式把根目录挂到 index.html,浏览器地址栏保持 /dbx/ 不变,
+        // 相对资源与前端路径推断都依赖这个 URL 形态。见 issue #5518。
+        if let Ok(static_dir) = std::env::var("DBX_STATIC_DIR") {
+            use tower_http::services::ServeFile;
+            let index_path = format!("{static_dir}/index.html");
+            app = app.route_service(&format!("{public_base_path}/"), ServeFile::new(index_path));
+        }
     }
 
     // Bind address

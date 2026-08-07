@@ -42,9 +42,10 @@ import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { getCachedTableMetadata, loadTableIndexes, loadTableMetadata, type TableMetadataRequest } from "@/lib/metadata/tableMetadataCache";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
-import { connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { queryResultNameFromPreamble, queryResultSourceLabel } from "@/lib/sql/queryResultSource";
+import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
 import { simpleDataGridOrderByReferencesMissingColumn, sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
 import { MAX_RESULT_PAGE_SIZE, normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { elasticsearchRestRequestRanges, executableStatementRanges, splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
@@ -62,7 +63,7 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { recordQueryCancellationLatency, resourceLifecycleDiagnostics } from "@/lib/diagnostics/resourceLifecycleDiagnostics";
 import { appendDebugLog } from "@/lib/backend/debugLog";
-import { formatError, normalizeBackendError, type BackendError } from "@/lib/backend/errorUtils";
+import { BackendErrorException, formatError, normalizeBackendError, type BackendError } from "@/lib/backend/errorUtils";
 import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
 import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { resolveSavedSqlExecutionTarget, savedSqlExecutionTargetFromTab, type SavedSqlExecutionTarget, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
@@ -100,6 +101,10 @@ interface BuildQueryResultExportRequestOptions {
 
 interface OpenSavedSqlOptions {
   targetMode?: SavedSqlOpenTargetMode;
+}
+
+interface UpdateExecutionTargetOptions {
+  persistSavedSqlTarget?: boolean;
 }
 
 type DroppedTableObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW";
@@ -160,7 +165,9 @@ function exactTotalFromIncompletePage(result: QueryResult, pageLimit: number | u
 }
 
 export function appendQueryResultSegment(previous: QueryResult, segment: QueryResult, maxRows: number): QueryResult {
-  if (segment.execution_error) throw new Error(String(segment.rows[0]?.[0] ?? "Failed to load the next result segment"));
+  if (segment.execution_error) {
+    throw segment.error ? new BackendErrorException(segment.error) : new BackendErrorException(String(segment.rows[0]?.[0] ?? "Failed to load the next result segment"));
+  }
   if (previous.columns.length !== segment.columns.length || previous.columns.some((column, index) => column !== segment.columns[index])) {
     throw new Error("Result columns changed while loading the next segment");
   }
@@ -648,6 +655,7 @@ export const useQueryStore = defineStore("query", () => {
   const pendingCloseTabId = ref<string | null>(null);
   const pendingBatchCloseTabIds = ref<string[] | null>(null);
   const pendingBatchCloseFinalActiveTabId = ref<string | null | undefined>(undefined);
+  let pendingBatchCloseComplete: (() => void) | null = null;
   const isConfirmingAppClose = ref(false);
   const closeConfirmContext = ref<CloseConfirmContext>("tab");
   const tableStructureRefreshVersions = ref<Record<string, number>>({});
@@ -1157,7 +1165,8 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     const originalRows = tab.resultLocalSortOriginalRows;
-    const rowIndexes = direction ? sortDataGridRowIndexes(originalRows, columnIndex, direction) : originalRows.map((_, index) => index);
+    const columnType = tab.result.column_types?.[columnIndex];
+    const rowIndexes = direction ? sortDataGridRowIndexes(originalRows, columnIndex, direction, columnType) : originalRows.map((_, index) => index);
     const rows = rowIndexes.map((index) => originalRows[index]!);
     const originalMongoDocuments = tab.resultLocalSortOriginalMongoDocuments;
     const mongo_documents = originalMongoDocuments ? rowIndexes.map((index) => originalMongoDocuments[index]) : undefined;
@@ -1199,6 +1208,12 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function applyRestoredOpenTabs(restored: { tabs: QueryTab[]; activeTabId: string | null }) {
+    const connectionStore = useConnectionStore();
+    for (const tab of restored.tabs) {
+      if (tab.mode !== "data") continue;
+      const connection = connectionStore.getConfig(tab.connectionId);
+      if (connection) tab.schema = connectionObjectTreeNodeSchema(connection, tab.database, tab.schema);
+    }
     tabs.value = restored.tabs;
     activeTabId.value = restored.activeTabId;
     activeTabHistory.value = restored.activeTabId ? [restored.activeTabId] : [];
@@ -1269,6 +1284,9 @@ export const useQueryStore = defineStore("query", () => {
       sql: t.sql,
       savedSqlId: t.savedSqlId,
       externalSqlPath: t.externalSqlPath,
+      externalSqlFileVersion: t.externalSqlFileVersion,
+      externalSqlIgnoredFileVersion: t.externalSqlIgnoredFileVersion,
+      externalSqlFileMissing: t.externalSqlFileMissing,
       lastExecutedSql: t.lastExecutedSql,
       resultBaseSql: t.resultBaseSql,
       resultSortedSql: t.resultSortedSql,
@@ -1389,7 +1407,7 @@ export const useQueryStore = defineStore("query", () => {
     });
   }
 
-  function openExternalSqlFile(connectionId: string, database: string, path: string, sql: string) {
+  function openExternalSqlFile(connectionId: string, database: string, path: string, sql: string, version?: QueryTab["externalSqlFileVersion"]) {
     const normalizedPath = normalizeExternalSqlPath(path);
     const existing = tabs.value.find((tab) => tab.mode === "query" && tab.externalSqlPath && normalizeExternalSqlPath(tab.externalSqlPath) === normalizedPath);
     if (existing) {
@@ -1409,6 +1427,7 @@ export const useQueryStore = defineStore("query", () => {
       sql,
       originalSql: sql,
       externalSqlPath: path,
+      externalSqlFileVersion: version,
       isExecuting: false,
       isCancelling: false,
       isExplaining: false,
@@ -1728,6 +1747,33 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function openMqttAdmin(connectionId: string, target?: { initialTopic?: string }) {
+    const existing = tabs.value.find((tab) => tab.mode === "mqtt" && tab.connectionId === connectionId);
+    if (existing) {
+      if (target?.initialTopic) existing.mqttInitialTopic = target.initialTopic;
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const conn = useConnectionStore().getConfig(connectionId);
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: `${conn?.name || "MQTT"} Console`,
+      connectionId,
+      database: conn?.database || "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "mqtt",
+      mqttInitialTopic: target?.initialTopic,
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
   function clearNacosNavigationTarget(connectionId: string, namespace: string, requestId?: number) {
     const tab = tabs.value.find((candidate) => candidate.mode === "nacos" && candidate.connectionId === connectionId && (candidate.nacosNamespace || "") === namespace);
     if (!tab || (requestId !== undefined && tab.nacosTargetRequestId !== requestId)) return;
@@ -1816,6 +1862,46 @@ export const useQueryStore = defineStore("query", () => {
     if (tab) tab.originalSql = tab.sql;
   }
 
+  function applyExternalSqlFileSnapshot(id: string, sql: string, version: NonNullable<QueryTab["externalSqlFileVersion"]>) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab?.externalSqlPath) return;
+    tab.sql = sql;
+    tab.originalSql = sql;
+    tab.externalSqlFileVersion = version;
+    tab.externalSqlIgnoredFileVersion = undefined;
+    tab.externalSqlFileMissing = undefined;
+  }
+
+  function markExternalSqlFileSaved(id: string, version: NonNullable<QueryTab["externalSqlFileVersion"]>) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab?.externalSqlPath) return;
+    tab.originalSql = tab.sql;
+    tab.externalSqlFileVersion = version;
+    tab.externalSqlIgnoredFileVersion = undefined;
+    tab.externalSqlFileMissing = undefined;
+  }
+
+  function updateExternalSqlFileVersion(id: string, version: NonNullable<QueryTab["externalSqlFileVersion"]>) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab?.externalSqlPath) return;
+    tab.externalSqlFileVersion = version;
+    tab.externalSqlIgnoredFileVersion = undefined;
+    tab.externalSqlFileMissing = undefined;
+  }
+
+  function ignoreExternalSqlFileVersion(id: string, version: NonNullable<QueryTab["externalSqlFileVersion"]>) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab?.externalSqlPath) return;
+    tab.externalSqlIgnoredFileVersion = version;
+    tab.externalSqlFileMissing = undefined;
+  }
+
+  function acknowledgeExternalSqlFileMissing(id: string) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab?.externalSqlPath) return;
+    tab.externalSqlFileMissing = true;
+  }
+
   function persistSavedSqlEditorPosition(tab: QueryTab | undefined) {
     if (!tab?.savedSqlId || tab.mode !== "query") return;
     const pending = savedSqlEditorPositionTimers.get(tab.savedSqlId);
@@ -1869,11 +1955,14 @@ export const useQueryStore = defineStore("query", () => {
 
   function finishPendingBatchClose() {
     const finalActiveTabId = pendingBatchCloseFinalActiveTabId.value;
+    const onComplete = pendingBatchCloseComplete;
     pendingBatchCloseTabIds.value = null;
     pendingBatchCloseFinalActiveTabId.value = undefined;
+    pendingBatchCloseComplete = null;
     if (finalActiveTabId !== undefined) {
       activeTabId.value = finalActiveTabId && tabs.value.some((tab) => tab.id === finalActiveTabId) ? finalActiveTabId : null;
     }
+    return onComplete;
   }
 
   function continuePendingBatchClose() {
@@ -1883,7 +1972,7 @@ export const useQueryStore = defineStore("query", () => {
     const remainingIds = pendingIds.filter((id) => tabs.value.some((tab) => tab.id === id));
     pendingBatchCloseTabIds.value = remainingIds;
     if (remainingIds.length === 0) {
-      finishPendingBatchClose();
+      finishPendingBatchClose()?.();
       return;
     }
 
@@ -1894,15 +1983,20 @@ export const useQueryStore = defineStore("query", () => {
       return;
     }
 
-    finishPendingBatchClose();
+    const onComplete = finishPendingBatchClose();
     for (const id of remainingIds) closeTab(id, { force: true });
+    onComplete?.();
   }
 
-  function beginBatchClose(ids: string[], finalActiveTabId?: string | null) {
+  function beginBatchClose(ids: string[], finalActiveTabId?: string | null, onComplete?: () => void) {
     const uniqueIds = [...new Set(ids)].filter((id) => tabs.value.some((tab) => tab.id === id));
-    if (uniqueIds.length === 0) return;
+    if (uniqueIds.length === 0) {
+      onComplete?.();
+      return;
+    }
     pendingBatchCloseTabIds.value = uniqueIds;
     pendingBatchCloseFinalActiveTabId.value = finalActiveTabId;
+    pendingBatchCloseComplete = onComplete ?? null;
     continuePendingBatchClose();
   }
 
@@ -1964,12 +2058,14 @@ export const useQueryStore = defineStore("query", () => {
     const pendingId = pendingCloseTabId.value;
     const batchIds = pendingBatchCloseTabIds.value?.filter((id) => tabs.value.some((tab) => tab.id === id)) ?? null;
     const finalActiveTabId = pendingBatchCloseFinalActiveTabId.value;
+    const onBatchComplete = pendingBatchCloseComplete;
     const confirmingAppClose = isConfirmingAppClose.value;
 
     pendingCloseTabId.value = null;
     showCloseConfirm.value = false;
     pendingBatchCloseTabIds.value = null;
     pendingBatchCloseFinalActiveTabId.value = undefined;
+    pendingBatchCloseComplete = null;
     isConfirmingAppClose.value = false;
     closeConfirmContext.value = "tab";
 
@@ -1981,6 +2077,7 @@ export const useQueryStore = defineStore("query", () => {
     if (finalActiveTabId !== undefined) {
       activeTabId.value = finalActiveTabId && tabs.value.some((tab) => tab.id === finalActiveTabId) ? finalActiveTabId : null;
     }
+    if (batchIds) onBatchComplete?.();
   }
 
   function cancelClosePendingTab() {
@@ -1988,6 +2085,7 @@ export const useQueryStore = defineStore("query", () => {
     showCloseConfirm.value = false;
     pendingBatchCloseTabIds.value = null;
     pendingBatchCloseFinalActiveTabId.value = undefined;
+    pendingBatchCloseComplete = null;
     isConfirmingAppClose.value = false;
     closeConfirmContext.value = "tab";
   }
@@ -2020,12 +2118,14 @@ export const useQueryStore = defineStore("query", () => {
     const pendingId = pendingCloseTabId.value;
     const batchIds = pendingBatchCloseTabIds.value?.filter((id) => tabs.value.some((tab) => tab.id === id)) ?? null;
     const finalActiveTabId = pendingBatchCloseFinalActiveTabId.value;
+    const onBatchComplete = pendingBatchCloseComplete;
     const confirmingAppClose = isConfirmingAppClose.value;
 
     pendingCloseTabId.value = null;
     showCloseConfirm.value = false;
     pendingBatchCloseTabIds.value = null;
     pendingBatchCloseFinalActiveTabId.value = undefined;
+    pendingBatchCloseComplete = null;
     isConfirmingAppClose.value = false;
     closeConfirmContext.value = "tab";
 
@@ -2036,6 +2136,7 @@ export const useQueryStore = defineStore("query", () => {
     if (finalActiveTabId !== undefined) {
       activeTabId.value = finalActiveTabId && tabs.value.some((tab) => tab.id === finalActiveTabId) ? finalActiveTabId : null;
     }
+    if (batchIds) onBatchComplete?.();
     return "tabs" as const;
   }
 
@@ -2045,6 +2146,22 @@ export const useQueryStore = defineStore("query", () => {
       tabs.value.filter((tab) => tab.id !== id).map((tab) => tab.id),
       id,
     );
+  }
+
+  function closeRightTabs(id: string, onComplete?: () => void) {
+    const target = tabs.value.find((tab) => tab.id === id);
+    if (!target) return;
+
+    const groupedTabs = tabs.value.filter((tab) => Boolean(tab.pinned) === Boolean(target.pinned));
+    const targetIndex = groupedTabs.findIndex((tab) => tab.id === id);
+    const ids = groupedTabs.slice(targetIndex + 1).map((tab) => tab.id);
+    if (ids.length === 0) {
+      onComplete?.();
+      return;
+    }
+
+    const finalActiveTabId = activeTabId.value && !ids.includes(activeTabId.value) ? activeTabId.value : id;
+    beginBatchClose(ids, finalActiveTabId, onComplete);
   }
 
   function finalActiveTabAfterClosing(ids: string[]) {
@@ -2472,16 +2589,22 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab) return;
     tab.savedSqlId = savedSqlId;
     tab.externalSqlPath = undefined;
+    tab.externalSqlFileVersion = undefined;
+    tab.externalSqlIgnoredFileVersion = undefined;
+    tab.externalSqlFileMissing = undefined;
     if (title) {
       tab.title = title;
       tab.customTitle = true;
     }
   }
 
-  function linkExternalSqlPath(id: string, path: string, title?: string) {
+  function linkExternalSqlPath(id: string, path: string, title?: string, version?: QueryTab["externalSqlFileVersion"]) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
     tab.externalSqlPath = path;
+    tab.externalSqlFileVersion = version;
+    tab.externalSqlIgnoredFileVersion = undefined;
+    tab.externalSqlFileMissing = undefined;
     tab.savedSqlId = undefined;
     if (title) {
       tab.title = title;
@@ -2499,12 +2622,13 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function applySavedSqlExecutionTarget(tab: QueryTab, target: SavedSqlExecutionTarget) {
-    updateConnection(tab.id, target.connectionId, target.database);
+    const options = { persistSavedSqlTarget: false };
+    updateConnection(tab.id, target.connectionId, target.database, options);
     if (tab.catalog !== target.catalog || tab.database !== target.database) {
-      if (tab.catalog !== undefined || target.catalog !== undefined) updateCatalog(tab.id, target.catalog, target.database);
-      else updateDatabase(tab.id, target.database);
+      if (tab.catalog !== undefined || target.catalog !== undefined) updateCatalog(tab.id, target.catalog, target.database, options);
+      else updateDatabase(tab.id, target.database, options);
     }
-    updateSchema(tab.id, target.schema);
+    updateSchema(tab.id, target.schema, options);
   }
 
   function openSavedSql(file: SavedSqlFile, options: OpenSavedSqlOptions = {}) {
@@ -2584,7 +2708,19 @@ export const useQueryStore = defineStore("query", () => {
     tabs.value = orderPinnedFirst(tabs.value, (item) => !!item.pinned);
   }
 
-  function updateDatabase(id: string, database: string) {
+  function persistSavedSqlExecutionTarget(tab: QueryTab, options: UpdateExecutionTargetOptions) {
+    if (options.persistSavedSqlTarget === false || tab.mode !== "query" || !tab.savedSqlId) return;
+    const savedSqlStore = useSavedSqlStore();
+    void savedSqlStore
+      .updateFileExecutionTarget(tab.savedSqlId, {
+        connectionId: tab.connectionId,
+        database: tab.database,
+        schema: tab.schema,
+      })
+      .catch((error) => console.warn("[DBX][saved-sql:target:error]", error));
+  }
+
+  function updateDatabase(id: string, database: string, options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.database === database) return;
     rollbackTabTransaction(tab);
@@ -2599,9 +2735,10 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortedSql = undefined;
     clearExplain(tab);
     tab.tableMeta = undefined;
+    persistSavedSqlExecutionTarget(tab, options);
   }
 
-  function updateCatalog(id: string, catalog: string | undefined, database: string) {
+  function updateCatalog(id: string, catalog: string | undefined, database: string, options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (!tab || (tab.catalog === catalog && tab.database === database)) return;
     rollbackTabTransaction(tab);
@@ -2617,9 +2754,10 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortedSql = undefined;
     clearExplain(tab);
     tab.tableMeta = undefined;
+    persistSavedSqlExecutionTarget(tab, options);
   }
 
-  function updateSchema(id: string, schema: string | undefined) {
+  function updateSchema(id: string, schema: string | undefined, options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.schema === schema) return;
     rollbackTabTransaction(tab);
@@ -2634,9 +2772,10 @@ export const useQueryStore = defineStore("query", () => {
     }
     tab.schema = schema;
     if (tab.mode === "objects") tab.objectBrowser = { ...tab.objectBrowser, schema, viewport: undefined };
+    persistSavedSqlExecutionTarget(tab, options);
   }
 
-  function updateConnection(id: string, connectionId: string, database = "") {
+  function updateConnection(id: string, connectionId: string, database = "", options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.connectionId === connectionId) return;
     rollbackTabTransaction(tab, { resetAutoCommit: true });
@@ -2654,6 +2793,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortedSql = undefined;
     clearExplain(tab);
     tab.tableMeta = undefined;
+    persistSavedSqlExecutionTarget(tab, options);
   }
 
   function clearInvalidDataTabSortState(tab: QueryTab, columns: NonNullable<QueryTab["tableMeta"]>["columns"]): boolean {
@@ -3336,6 +3476,8 @@ export const useQueryStore = defineStore("query", () => {
       tab.queryExecutionStartedAt = Date.now();
     }
     tab.executionId = executionId;
+    const tableDataNativeSelectionBlockOwner = tab.mode === "data" ? {} : undefined;
+    if (tableDataNativeSelectionBlockOwner) beginDataGridNativeSelectionBlock(tableDataNativeSelectionBlockOwner);
     const previousDisplayedSql = tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql;
     tab.lastExecutedSql = sql;
     tab.resultLocalSortOriginalRows = undefined;
@@ -3527,7 +3669,7 @@ export const useQueryStore = defineStore("query", () => {
                 if (!pagePlan) throw new Error(describeMongoCommandParseFailure(sourceStatement));
                 // A stale request can point past an explicit .limit() bound. Keep
                 // the backend call bounded so limit(0) cannot become unbounded.
-                const result = await api.mongoFindDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, pagePlan.requestSkip, Math.max(1, pagePlan.requestLimit), mongoCommand.filter, mongoCommand.projection, mongoCommand.sort, executionId);
+                const result = await api.mongoFindDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, pagePlan.requestSkip, Math.max(1, pagePlan.requestLimit), mongoCommand.filter, mongoCommand.projection, mongoCommand.sort, mongoCommand.collation, executionId);
                 const documents = pagePlan.requestLimit === 0 ? [] : result.documents;
                 const extendedDocuments = pagePlan.requestLimit === 0 ? [] : result.extended_documents;
                 const totalIsExact = result.total_is_exact !== false;
@@ -4227,6 +4369,7 @@ export const useQueryStore = defineStore("query", () => {
         syncDisplayedResultRun(current, queryBaseSql, openInNewResultTab);
       }
     } finally {
+      if (tableDataNativeSelectionBlockOwner) finishDataGridNativeSelectionBlock(tableDataNativeSelectionBlockOwner);
       const current = tabs.value.find((t) => t.id === id);
       if (current?.executionId === executionId) {
         const liveBatch = liveBatchSqlExecutions.get(current);
@@ -5036,7 +5179,7 @@ export const useQueryStore = defineStore("query", () => {
         if (!plan) throw new Error(QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR);
         if (plan.requestLimit === 0) break;
 
-        const result = await api.mongoFindDocuments(tab.connectionId, tab.database, mongoCommand.collection, plan.requestSkip, plan.requestLimit, mongoCommand.filter, mongoCommand.projection, mongoCommand.sort, exportExecutionId);
+        const result = await api.mongoFindDocuments(tab.connectionId, tab.database, mongoCommand.collection, plan.requestSkip, plan.requestLimit, mongoCommand.filter, mongoCommand.projection, mongoCommand.sort, mongoCommand.collation, exportExecutionId);
         const pageDocuments = result.documents.slice(0, plan.requestLimit);
         documents.push(...pageDocuments);
 
@@ -5262,9 +5405,15 @@ export const useQueryStore = defineStore("query", () => {
     completePendingCloseAfterSaveAll,
     isTabDirty,
     markTabClean,
+    applyExternalSqlFileSnapshot,
+    markExternalSqlFileSaved,
+    updateExternalSqlFileVersion,
+    ignoreExternalSqlFileVersion,
+    acknowledgeExternalSqlFileMissing,
     discardTabChanges,
     requestAppCloseConfirmation,
     closeOtherTabs,
+    closeRightTabs,
     closeOtherRegularTabs,
     closeRegularTabs,
     closeOtherFixedTabs,
@@ -5302,6 +5451,7 @@ export const useQueryStore = defineStore("query", () => {
     openNacosDashboard,
     openDamengJobAdmin,
     openMqAdmin,
+    openMqttAdmin,
     openNacosAdmin,
     clearNacosNavigationTarget,
     openTableStructure,
