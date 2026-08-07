@@ -904,7 +904,7 @@ async function load(options: { page?: number } = {}) {
     }
     const sort = currentDocumentSortJson(sortInput.value);
     const skip = requestPage * pageSize.value;
-    const result = await api.documentFindDocuments(connectionId, database, collection, skip, documentRequestLimit.value, filter, undefined, sort, executionId);
+    const result = await api.documentFindDocuments(connectionId, database, collection, skip, documentRequestLimit.value, filter, undefined, sort, undefined, executionId);
     if (documentLoadExecutionId.value !== executionId) return;
     if (connectionId !== props.connectionId || database !== props.database || collection !== props.collection || storeKind !== documentStoreProvider.value.kind) return;
     const nextDocuments =
@@ -1640,10 +1640,10 @@ defineExpose({ focusSearch });
             </span>
           </label>
           <DataGridCopyFormatControl
-            :current-label="dataGridRef?.defaultCopyExtractorLabel ?? '-'"
-            :current-value="dataGridRef?.defaultCopyExtractor ?? ''"
-            :items="dataGridRef?.copyExtractorMenuItems ?? []"
-            @select="dataGridRef?.setDefaultCopyExtractor($event)"
+            :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
+            :current-value="dataGridRef?.defaultCopyPreference ?? ''"
+            :items="dataGridRef?.copyPreferenceMenuItems ?? []"
+            @select="dataGridRef?.setDefaultCopyPreference($event)"
             @configure="openDataGridExtractorConfiguration"
           />
         </PopoverContent>

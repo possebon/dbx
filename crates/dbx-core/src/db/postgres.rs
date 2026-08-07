@@ -464,10 +464,8 @@ pub(crate) enum PgColType {
     Other,
 }
 
-const POSTGRES_FIRST_NORMAL_OBJECT_ID: u32 = 16_384;
-
 fn pg_scalar_type_requires_text_protocol(oid: u32, col_type: PgColType) -> bool {
-    oid >= POSTGRES_FIRST_NORMAL_OBJECT_ID && !matches!(col_type, PgColType::Vector | PgColType::Geometry)
+    Type::from_oid(oid).is_none() && !matches!(col_type, PgColType::Vector | PgColType::Geometry)
 }
 
 fn pg_type_requires_text_protocol(pg_type: &Type, col_type: PgColType) -> bool {
@@ -476,9 +474,10 @@ fn pg_type_requires_text_protocol(pg_type: &Type, col_type: PgColType) -> bool {
     }
 
     match pg_type.kind() {
-        Kind::Array(element_type) => element_type.oid() >= POSTGRES_FIRST_NORMAL_OBJECT_ID,
+        Kind::Enum(_) => false,
+        Kind::Array(element_type) => Type::from_oid(element_type.oid()).is_none(),
         Kind::Simple => pg_scalar_type_requires_text_protocol(pg_type.oid(), col_type),
-        _ => pg_type.oid() >= POSTGRES_FIRST_NORMAL_OBJECT_ID,
+        _ => Type::from_oid(pg_type.oid()).is_none(),
     }
 }
 
@@ -1441,11 +1440,27 @@ async fn stream_query_rows_text_on_client(
 }
 
 pub async fn connect(url: &str, fallback_timeout: Duration) -> Result<Pool, String> {
-    let timezone = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
-    connect_with_local_timezone(url, fallback_timeout, &timezone).await
+    #[cfg(all(windows, target_vendor = "win7"))]
+    {
+        connect_with_optional_local_timezone(url, fallback_timeout, None).await
+    }
+
+    #[cfg(not(all(windows, target_vendor = "win7")))]
+    {
+        let timezone = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
+        connect_with_local_timezone(url, fallback_timeout, &timezone).await
+    }
 }
 
 async fn connect_with_local_timezone(url: &str, fallback_timeout: Duration, timezone: &str) -> Result<Pool, String> {
+    connect_with_optional_local_timezone(url, fallback_timeout, Some(timezone)).await
+}
+
+async fn connect_with_optional_local_timezone(
+    url: &str,
+    fallback_timeout: Duration,
+    timezone: Option<&str>,
+) -> Result<Pool, String> {
     let url_with_keepalive = inject_postgres_keepalive_params(url);
     let postgres_url = postgres_connection_url(&url_with_keepalive)?;
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -1488,7 +1503,9 @@ async fn connect_with_local_timezone(url: &str, fallback_timeout: Duration, time
         let client =
             pool.get().await.map_err(|e| format!("PostgreSQL connection failed: {}", pg_pool_error_to_string(e)))?;
         if !pg_url_has_timezone_setting(url) {
-            set_automatic_postgres_timezone(&client, timezone).await?;
+            if let Some(timezone) = timezone {
+                set_automatic_postgres_timezone(&client, timezone).await?;
+            }
         }
 
         Ok(pool)
@@ -4768,7 +4785,7 @@ mod tests {
 
     #[test]
     fn postgres_custom_other_type_requires_text_protocol() {
-        assert!(pg_scalar_type_requires_text_protocol(POSTGRES_FIRST_NORMAL_OBJECT_ID, PgColType::Other));
+        assert!(pg_scalar_type_requires_text_protocol(8_880, PgColType::Other));
         assert!(pg_scalar_type_requires_text_protocol(98_765, PgColType::Other));
         assert!(pg_scalar_type_requires_text_protocol(98_765, PgColType::GenericArray));
     }
@@ -4787,13 +4804,41 @@ mod tests {
     }
 
     #[test]
+    fn postgres_enum_keeps_binary_protocol() {
+        let enum_type = Type::new(
+            "withdraw_btc_status".to_string(),
+            98_765,
+            Kind::Enum(vec!["pending".to_string(), "completed".to_string()]),
+            "risk".to_string(),
+        );
+        let enum_array =
+            Type::new("_withdraw_btc_status".to_string(), 98_766, Kind::Array(enum_type.clone()), "risk".to_string());
+
+        assert!(!pg_type_requires_text_protocol(&enum_type, PgColType::Other));
+        assert!(pg_type_requires_text_protocol(&enum_array, PgColType::GenericArray));
+    }
+
+    #[test]
     fn postgres_builtin_or_supported_type_keeps_binary_protocol() {
-        assert!(!pg_scalar_type_requires_text_protocol(POSTGRES_FIRST_NORMAL_OBJECT_ID - 1, PgColType::Other));
         assert!(!pg_type_requires_text_protocol(&Type::INT4, PgColType::Other));
         assert!(!pg_type_requires_text_protocol(&Type::VARCHAR, PgColType::Other));
         assert!(!pg_type_requires_text_protocol(&Type::INT4_ARRAY, PgColType::GenericArray));
         assert!(!pg_scalar_type_requires_text_protocol(98_765, PgColType::Vector));
         assert!(!pg_scalar_type_requires_text_protocol(98_765, PgColType::Geometry));
+    }
+
+    #[test]
+    fn postgres_compatible_builtin_names_with_unknown_low_oids_require_text_protocol() {
+        let compatible_date = Type::new("date".to_string(), 8_881, Kind::Simple, "pg_catalog".to_string());
+        let compatible_tinyint = Type::new("tinyint".to_string(), 8_882, Kind::Simple, "pg_catalog".to_string());
+
+        assert!(Type::from_oid(compatible_date.oid()).is_none());
+        assert!(Type::from_oid(compatible_tinyint.oid()).is_none());
+        assert!(pg_type_requires_text_protocol(
+            &compatible_date,
+            PgColType::Temporal { fallback: PgTemporalFallback::Probe }
+        ));
+        assert!(pg_type_requires_text_protocol(&compatible_tinyint, PgColType::Other));
     }
 
     #[test]

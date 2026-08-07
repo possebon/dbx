@@ -1,13 +1,15 @@
-# Keep formatter-sensitive source files consistent across platforms. The
-# last three lines exist for docs_export_bundle_is_current, which hashes raw
-# bytes: every extension it manifests (.css, tsconfig.json, and the one .ts
-# outside src/ — vite.docs-export.config.ts) needs an explicit eol=lf, or a
-# CRLF checkout fails the guard for files the contributor never touched.
+# Keep formatter-sensitive source files consistent across platforms. The three
+# apps/desktop rules below the .vue line exist for
+# docs_export_bundle_is_current, which hashes raw bytes: every extension it
+# manifests (.css, tsconfig.json, and the one .ts outside src/ —
+# vite.docs-export.config.ts) needs an explicit eol=lf, or a CRLF checkout
+# fails the guard for files the contributor never touched.
 apps/desktop/src/**/*.ts text eol=lf
 apps/desktop/src/**/*.vue text eol=lf
 apps/desktop/**/*.css text eol=lf
 apps/desktop/tsconfig.json text eol=lf
 apps/desktop/*.ts text eol=lf
+src-tauri/windows/nsis/**/*.nsi text eol=lf
 
 # Keep tests available for review and CI without counting them as shipped code
 # in GitHub's repository language breakdown.

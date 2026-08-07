@@ -222,6 +222,49 @@ describe("DataGridPagination", () => {
     await mounted.setProps({ loading: true });
     const busyNavigation = findAll(mounted.root, (node) => node.props["data-stub"] === "Button" && node.props.class === "h-5 w-5 shrink-0");
     expect(busyNavigation.map((node) => node.props.disabled)).toEqual([true, true, true, true]);
+    expect(findOne(mounted.root, (node) => node.props["aria-label"] === "grid.jumpToPage").props.disabled).toBe(true);
+  });
+
+  it("jumps to an entered page and enforces page input boundaries", async () => {
+    const jumpPage = vi.fn();
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: null,
+      selectionSummarySumText: "",
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 3,
+      maxPage: 12,
+      canGoNextPage: true,
+      canJumpLastPage: true,
+      onJumpPage: jumpPage,
+    });
+    const pageInput = findOne(mounted.root, (node) => node.props["aria-label"] === "grid.jumpToPage");
+
+    expect(pageInput.props.modelValue).toBe("3");
+    pageInput.props["onUpdate:modelValue"]("8");
+    await nextTick();
+    const enter = dispatch(pageInput, "keydown", { key: "Enter" });
+    expect(enter.defaultPrevented).toBe(true);
+    expect(enter.propagationStopped).toBe(true);
+    expect(jumpPage).toHaveBeenLastCalledWith(8);
+
+    pageInput.props["onUpdate:modelValue"]("99");
+    await nextTick();
+    dispatch(pageInput, "keydown", { key: "Enter" });
+    expect(jumpPage).toHaveBeenLastCalledWith(12);
+
+    pageInput.props["onUpdate:modelValue"]("0");
+    await nextTick();
+    dispatch(pageInput, "keydown", { key: "Enter" });
+    await nextTick();
+    const resetPageInput = findOne(mounted.root, (node) => node.props["aria-label"] === "grid.jumpToPage");
+    expect(jumpPage).toHaveBeenCalledTimes(2);
+    expect(resetPageInput.props.modelValue).toBe("3");
   });
 
   it("hides pagination controls when the data source does not support paging", () => {
@@ -344,7 +387,7 @@ describe("DataGridColumnHeader", () => {
 });
 
 describe("DataGridFilterBuilder", () => {
-  it("clips long selected values inside the filter grid", () => {
+  it("keeps selected columns and values readable without stretching the controls", () => {
     const mounted = mountComponent(DataGridFilterBuilder, {
       rules: [{ id: "r1", columnName: "appointmentStatusWithAnExceptionallyLongName", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
       columns: ["appointmentStatusWithAnExceptionallyLongName", "name"],
@@ -357,7 +400,7 @@ describe("DataGridFilterBuilder", () => {
     const triggers = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectTrigger");
     const selectValues = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectValue");
     const items = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem");
-    const ruleGrid = findOne(mounted.root, (node) => String(node.props.class).includes("grid-cols-[minmax(0,1fr)_80px_minmax(0,1fr)_auto]"));
+    const ruleGrid = findOne(mounted.root, (node) => String(node.props.class).includes("grid-cols-[minmax(0,210px)_88px_minmax(0,210px)_auto]"));
     const searchInput = findOne(mounted.root, (node) => node.type === "input" && node.props.placeholder === "grid.filterBuilderSearchColumns");
     const valueEditor = findOne(mounted.root, (node) => node.props["data-filter-value-editor"] === "");
 
@@ -371,7 +414,8 @@ describe("DataGridFilterBuilder", () => {
     expect(items.every((item) => String(item.props.class).includes("rounded-none"))).toBe(true);
     expect(searchInput.props.placeholder).toBe("grid.filterBuilderSearchColumns");
     expect(valueEditor.props.placeholder).toBe("grid.filterBuilderValue");
-    expect(String(ruleGrid.props.class)).toContain("grid-cols-[minmax(0,1fr)_80px_minmax(0,1fr)_auto]");
+    expect(String(ruleGrid.props.class)).toContain("grid-cols-[minmax(0,210px)_88px_minmax(0,210px)_auto]");
+    expect(String(ruleGrid.props.class)).toContain("justify-start");
     for (const trigger of triggers) {
       expect(String(trigger.props.class)).toContain("w-full");
       expect(String(trigger.props.class)).toContain("overflow-hidden");
@@ -598,7 +642,7 @@ describe("DataGridQueryControls", () => {
     });
     const popoverContent = findOne(mounted.root, (node) => node.props["data-stub"] === "PopoverContent");
 
-    expect(String(popoverContent.props.class)).toContain("w-[480px]");
+    expect(String(popoverContent.props.class)).toContain("w-[624px]");
     expect(String(popoverContent.props.class)).toContain("max-w-[calc(100vw-24px)]");
   });
 
