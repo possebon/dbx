@@ -543,12 +543,14 @@ async fn run_docs(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, Cli
     }
 
     let lang = flags.lang.as_deref().unwrap_or("en");
-    let html = dbx_core::docs::to_standalone_html(&snapshot, &annotations, lang).map_err(|error| CliError::new("EXPORT_FAILED", error))?;
+    let html = dbx_core::docs::to_standalone_html(&snapshot, &annotations, lang)
+        .map_err(|error| CliError::new("EXPORT_FAILED", error))?;
 
     match flags.out.as_ref() {
         Some(path) => {
-            std::fs::write(path, &html)
-                .map_err(|error| CliError::new("WRITE_FAILED", format!("Failed to write {}: {error}", path.display())))?;
+            std::fs::write(path, &html).map_err(|error| {
+                CliError::new("WRITE_FAILED", format!("Failed to write {}: {error}", path.display()))
+            })?;
             Ok(format!("Wrote {} bytes to {}", html.len(), path.display()))
         }
         None => Ok(html),
