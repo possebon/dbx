@@ -97,6 +97,15 @@ jobs:
       - name: Build the docs export smoke fixture example
         run: cargo build -p dbx-core --locked --no-default-features --example docs_export_smoke
 
+      # Guards that the committed bundle (crates/dbx-core/assets/docs-export.*)
+      # matches the sources under apps/desktop/ it was built from. This job is
+      # what runs on a frontend-only change, so the guard has to run here too —
+      # rust-test is gated on crates/**/src-tauri/**/Cargo.*, none of which a
+      # frontend-only PR touches. Same `--no-default-features` fingerprint as
+      # the prebuild step above, so this is a cache hit, not a fresh compile.
+      - name: Guard the committed docs export bundle
+        run: cargo test -p dbx-core --locked --no-default-features --lib docs::export
+
       - name: Show sccache stats
         if: always()
         continue-on-error: true
@@ -455,6 +464,8 @@ jobs:
               - 'package.json'
               - '.oxfmtrc.json'
               - 'scripts/run-check.mjs'
+              - 'crates/dbx-core/src/docs/**'
+              - 'crates/dbx-core/assets/docs-export.*'
               - '.github/workflows/ci.yml'
             packages:
               - 'packages/cli/**'
