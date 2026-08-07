@@ -2,23 +2,60 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse } from "vue/compiler-sfc";
+import ts from "typescript";
 
 const docsRoot = path.resolve(__dirname, "..");
 
-function vueFiles(): string[] {
+function filesWithExtension(extension: string): string[] {
   const found: string[] = [];
   const walk = (dir: string) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory() && entry.name !== "__tests__" && entry.name !== "fixtures") {
         walk(full);
-      } else if (entry.isFile() && entry.name.endsWith(".vue")) {
+      } else if (entry.isFile() && entry.name.endsWith(extension)) {
         found.push(full);
       }
     }
   };
   walk(docsRoot);
   return found;
+}
+
+function vueFiles(): string[] {
+  return filesWithExtension(".vue");
+}
+
+// Every pure module beside the components — docsIndex.ts, docsSearch.ts,
+// docsWarnings.ts, and so on. "(no group)" lived in one of these
+// (docsIndex.ts) and was invisible to the guard below until this existed:
+// that guard only ever walked .vue files, so a literal that never touches a
+// template — only a data field a template later reads — was outside its
+// reach entirely.
+function tsFiles(): string[] {
+  return filesWithExtension(".ts");
+}
+
+/**
+ * Every namespace-key VALUE currently spelled out in en.ts, long enough and
+ * plain enough to check for. Shared by both the .vue and .ts scans below so
+ * there is exactly one definition of "what counts as a hardcoded literal" —
+ * not two lists that can drift out of step with each other.
+ */
+async function namespaceLiterals(): Promise<string[]> {
+  const en = (await import("../../i18n/locales/docs/en")).default as Record<string, unknown>;
+  const literals: string[] = [];
+  const walk = (node: unknown) => {
+    if (typeof node === "string") {
+      // Skip short strings (false positives on words like "LOCAL") and any
+      // string carrying a placeholder, which cannot appear verbatim anyway.
+      if (node.length >= 4 && !node.includes("{")) literals.push(node);
+      return;
+    }
+    if (node && typeof node === "object") Object.values(node).forEach(walk);
+  };
+  walk(en);
+  return literals;
 }
 
 function scriptOf(file: string): string {
@@ -62,6 +99,30 @@ function domTextOf(file: string): { staticText: string; interpolations: string[]
     segments.push(match[1]);
   }
   return { staticText: segments.join(" "), interpolations };
+}
+
+/**
+ * Every string literal in a .ts file that could become a runtime VALUE —
+ * and, from there, reach a template as display text, exactly how
+ * docsIndex.ts's `label: "(no group)"` did. Excludes string literals in TYPE
+ * position, e.g. `type NoteSource = "DATABASE" | "LOCAL" | "NONE"`: those
+ * disappear at compile time and can never be displayed, so flagging them
+ * would be the .ts equivalent of the `=== 'LOCAL'` false positive from the
+ * last round. `ts.isLiteralTypeNode` is TypeScript's own distinction
+ * between the two, not a hand-picked exception — the same check the
+ * compiler itself uses to know it is looking at a type, not a value.
+ */
+function valueStringLiteralsOf(file: string): string[] {
+  const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+  const literals: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isStringLiteral(node) && !ts.isLiteralTypeNode(node.parent)) {
+      literals.push(node.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return literals;
 }
 
 const EXPECTED = ["ColumnTable.vue", "DocsApp.vue", "DocsSearch.vue", "DocsSidebar.vue", "EnumPage.vue", "GroupEditor.vue", "GroupPicker.vue", "NoteEditor.vue", "RelationshipList.vue", "SchemaDiagram.vue", "TablePage.vue", "WarningBanner.vue", "WikiIndex.vue"];
@@ -198,18 +259,7 @@ describe("docs viewer component contract", () => {
     // added tomorrow is covered tomorrow. This is the guard Part 3b lacked:
     // docsNamespaceParity compares locale files to EACH OTHER, so a key that
     // no component ever calls passes every existing test.
-    const en = (await import("../../i18n/locales/docs/en")).default as Record<string, unknown>;
-    const literals: string[] = [];
-    const walk = (node: unknown) => {
-      if (typeof node === "string") {
-        // Skip short strings (false positives on words like "LOCAL") and any
-        // string carrying a placeholder, which cannot appear verbatim anyway.
-        if (node.length >= 4 && !node.includes("{")) literals.push(node);
-        return;
-      }
-      if (node && typeof node === "object") Object.values(node).forEach(walk);
-    };
-    walk(en);
+    const literals = await namespaceLiterals();
     expect(literals.length).toBeGreaterThan(10);
 
     const files = vueFiles();
@@ -248,5 +298,20 @@ describe("docs viewer component contract", () => {
     // data-comparison false positives above. If a future defect turns out
     // to live in an attribute, that's this guard's known blind spot, not a
     // regression in it.
+
+    // The pure modules beside the components — docsIndex.ts's
+    // `label: "(no group)"` was exactly this: a literal that never touches a
+    // template directly, only a data field a template reads later. A .vue-only
+    // scan is structurally blind to it no matter how the .vue scan itself is
+    // shaped, so this is a second, independent walk over a different file
+    // extension rather than a wider regex over the same one.
+    const tsSourceFiles = tsFiles();
+    expect(tsSourceFiles.length).toBeGreaterThan(0);
+    for (const file of tsSourceFiles) {
+      const valueLiterals = valueStringLiteralsOf(file);
+      for (const literal of literals) {
+        expect(valueLiterals.includes(literal), `${path.basename(file)} hardcodes "${literal}" — call translate() instead`).toBe(false);
+      }
+    }
   });
 });
