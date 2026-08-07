@@ -46,5 +46,12 @@ describe("readPayload", () => {
   it("throws on a payload that is not base64", () => {
     document.body.innerHTML = `<div id="app"></div><script type="application/dbx-snapshot">not base64 at all!</script>`;
     expect(() => readPayload()).toThrow();
+    // The two failures must stay distinguishable: a document with no payload
+    // and a document with a damaged one are different problems for whoever
+    // produced the file. The decoder's own wording is not asserted — Chrome,
+    // Firefox and Safari each phrase it differently — but it must not be
+    // mistaken for the missing-element case. `main.spec.ts` covers what the
+    // reader actually sees for both.
+    expect(() => readPayload()).not.toThrow(/application\/dbx-snapshot/);
   });
 });
