@@ -5,12 +5,10 @@ import { clipToCard } from "../diagramGeometry";
 import type { Point } from "../diagramGeometry";
 import { qualifiedTableKey } from "../docsKeys";
 import { groupStyle } from "../groupColor";
-import type { Translate } from "../docsWarnings";
 import type { SchemaSnapshot } from "../types";
 
 const props = defineProps<{
   snapshot: SchemaSnapshot;
-  translate: Translate;
 }>();
 
 const emit = defineEmits<{

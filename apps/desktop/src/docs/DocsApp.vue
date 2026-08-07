@@ -208,7 +208,7 @@ function createGroupFor(tableKey: string): void {
 
       <EnumPage v-else-if="activeEnum" :enum-type="activeEnum" :snapshot="snapshot" :translate="translate" @select="open" />
 
-      <SchemaDiagram v-else-if="view === 'diagram'" :snapshot="snapshot" :translate="translate" @select="open" />
+      <SchemaDiagram v-else-if="view === 'diagram'" :snapshot="snapshot" @select="open" />
     </main>
   </div>
 </template>
